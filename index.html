@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini Canvas AI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React Flow Base Styles -->
+  <link rel="stylesheet" href="/reactflow.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    // Shim process.env for browser environment to prevent ReferenceError
+    window.process = {
+      env: {
+        API_KEY: "" // This will be populated by the environment
+      }
+    };
+  </script>
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      margin: 0;
+      overflow: hidden;
+      background-color: #0b0b0f;
+      color: #e2e2e7;
+    }
+
+    #root {
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #1a1a24;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #3f3f50;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #5a5a75;
+    }
+
+    /* React Flow overrides for dark theme */
+    .react-flow__pane {
+      background-color: #0b0b0f;
+    }
+
+    .react-flow {
+      background-color: #0b0b0f;
+    }
+
+    .react-flow__background {
+      background-color: #0b0b0f !important;
+    }
+
+    .react-flow__edge-path {
+      stroke: #4f46e5;
+      stroke-width: 3;
+    }
+
+    .react-flow__handle {
+      width: 10px;
+      height: 10px;
+      background: #4f46e5;
+      border: 2px solid #0b0b0f;
+    }
+
+    .react-flow__controls {
+      background: #1a1a24;
+      border: 1px solid #33334d;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    }
+
+    .react-flow__controls button {
+      background: #1a1a24;
+      border-bottom: 1px solid #33334d;
+      color: #e2e2e7;
+      fill: #e2e2e7;
+    }
+
+    .react-flow__controls button:hover {
+      background: #33334d;
+    }
+
+    .react-flow__attribution {
+      background: rgba(0, 0, 0, 0.5);
+      color: #666;
+      display: none;
+    }
+  </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19.0.0",
+    "react-dom": "https://esm.sh/react-dom@19.0.0",
+    "react-dom/client": "https://esm.sh/react-dom@19.0.0/client",
+    "reactflow": "https://esm.sh/reactflow@11.11.4",
+    "zustand": "https://esm.sh/zustand@5.0.1",
+    "uuid": "https://esm.sh/uuid@11.0.3",
+    "@google/genai": "https://esm.sh/@google/genai@0.2.1",
+    "lucide-react": "https://esm.sh/lucide-react@0.460.0",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/"
+  }
+}
+</script>
+  <link rel="stylesheet" href="/index.css">
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+
+</html>

@@ -1,0 +1,9 @@
+
+{
+  "name": "Gemini Canvas AI",
+  "description": "A powerful, infinite-canvas node-based AI workflow builder inspired by TapNow AI. Build complex AI pipelines for text, image, and video generation using the latest Gemini models.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

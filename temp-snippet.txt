@@ -1,0 +1,10 @@
+分组'
+};
+
+DEFAULT_NODE_LABELS[NodeType.TASK_SELECT] = '任务选择';
+DEFAULT_NODE_LABELS[NodeType.BATCH_EXECUTE] = '批量执行';
+
+export const useStore = create<CanvasState>((set, get) => ({
+  nodes: [
+    {
+  

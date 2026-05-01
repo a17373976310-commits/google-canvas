@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: ai-infinite-canvas-backend
+    runtime: python
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: AI_CANVAS_HISTORY_DIR
+        value: /opt/render/project/src/storage
+      - key: THIRD_PARTY_API_KEY
+        sync: false
+      - key: THIRD_PARTY_BASE_URL
+        value: https://api.openai.com/v1
+      - key: OPENAI_TIMEOUT_SECONDS
+        value: "120"
+      - key: HTTP_REQUEST_TIMEOUT_SECONDS
+        value: "60"
+      - key: OPENAI_MAX_RETRIES
+        value: "1"
+      - key: MAX_IMAGE_HISTORY_ITEMS
+        value: "300"
+    disk:
+      name: history
+      mountPath: /opt/render/project/src/storage
+      sizeGB: 5
