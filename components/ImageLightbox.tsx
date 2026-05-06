@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { X, Download, ZoomIn, ZoomOut, RotateCw, RotateCcw, Move } from 'lucide-react';
+import { X, Download, ZoomIn, ZoomOut, RotateCw, RotateCcw, Move, Copy, Loader2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 
 interface ImageLightboxProps {
@@ -10,12 +10,50 @@ interface ImageLightboxProps {
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
+const imageBlobToPng = (blob: Blob): Promise<Blob> => new Promise((resolve, reject) => {
+    if (blob.type === 'image/png') {
+        resolve(blob);
+        return;
+    }
+
+    const image = new Image();
+    const url = URL.createObjectURL(blob);
+    image.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth || image.width;
+        canvas.height = image.naturalHeight || image.height;
+        const context = canvas.getContext('2d');
+        if (!context) {
+            URL.revokeObjectURL(url);
+            reject(new Error('Canvas context unavailable'));
+            return;
+        }
+
+        context.drawImage(image, 0, 0);
+        canvas.toBlob((pngBlob) => {
+            URL.revokeObjectURL(url);
+            if (pngBlob) {
+                resolve(pngBlob);
+            } else {
+                reject(new Error('PNG conversion failed'));
+            }
+        }, 'image/png');
+    };
+    image.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('Image decode failed'));
+    };
+    image.src = url;
+});
+
 export const ImageLightbox: React.FC<ImageLightboxProps> = ({ src, alt, onClose }) => {
     const stageRef = React.useRef<HTMLDivElement>(null);
     const [scale, setScale] = React.useState(1);
     const [rotation, setRotation] = React.useState(0);
     const [offset, setOffset] = React.useState({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = React.useState(false);
+    const [isCopying, setIsCopying] = React.useState(false);
+    const [copyStatus, setCopyStatus] = React.useState<string | null>(null);
     const dragRef = React.useRef({ pointerId: -1, startX: 0, startY: 0, offsetX: 0, offsetY: 0, moved: false });
 
     const resetView = React.useCallback(() => {
@@ -26,7 +64,14 @@ export const ImageLightbox: React.FC<ImageLightboxProps> = ({ src, alt, onClose 
 
     useEffect(() => {
         resetView();
+        setCopyStatus(null);
     }, [src, resetView]);
+
+    useEffect(() => {
+        if (!copyStatus) return;
+        const timer = window.setTimeout(() => setCopyStatus(null), 2200);
+        return () => window.clearTimeout(timer);
+    }, [copyStatus]);
 
     useEffect(() => {
         const previousOverflow = document.body.style.overflow;
@@ -157,6 +202,42 @@ export const ImageLightbox: React.FC<ImageLightboxProps> = ({ src, alt, onClose 
         }
     };
 
+    const handleCopyImage = async () => {
+        if (isCopying) return;
+
+        setIsCopying(true);
+        setCopyStatus(null);
+
+        try {
+            const response = await fetch(src, src.startsWith('data:') ? undefined : { mode: 'cors' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const blob = await response.blob();
+            const pngBlob = await imageBlobToPng(blob);
+
+            if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+                throw new Error('Image clipboard unavailable');
+            }
+
+            await navigator.clipboard.write([
+                new ClipboardItem({ 'image/png': pngBlob }),
+            ]);
+            setCopyStatus('已复制图片');
+        } catch {
+            try {
+                if (!src.startsWith('data:') && navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(src);
+                    setCopyStatus('已复制图片链接');
+                    return;
+                }
+            } catch {
+                // Keep the user-facing failure below.
+            }
+            setCopyStatus('复制失败，请尝试下载');
+        } finally {
+            setIsCopying(false);
+        }
+    };
+
     return createPortal(
         <div
             className="fixed inset-0 z-[1000] bg-black/92 backdrop-blur-xl flex flex-col animate-in fade-in duration-200 select-none"
@@ -213,6 +294,15 @@ export const ImageLightbox: React.FC<ImageLightboxProps> = ({ src, alt, onClose 
                     </button>
                     <div className="w-px h-6 bg-white/10 mx-1" />
                     <button
+                        onClick={handleCopyImage}
+                        disabled={isCopying}
+                        data-testid="image-lightbox-copy"
+                        className="p-2.5 bg-white/5 hover:bg-white/10 disabled:opacity-60 disabled:cursor-wait rounded-xl text-gray-400 hover:text-white transition-all"
+                        title="复制图片"
+                    >
+                        {isCopying ? <Loader2 size={17} className="animate-spin" /> : <Copy size={17} />}
+                    </button>
+                    <button
                         onClick={handleDownload}
                         className="p-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-gray-400 hover:text-white transition-all"
                         title="下载图片"
@@ -240,12 +330,17 @@ export const ImageLightbox: React.FC<ImageLightboxProps> = ({ src, alt, onClose 
                 onPointerCancel={stopDragging}
                 onDoubleClick={handleDoubleClick}
             >
+                {copyStatus && (
+                    <div className="absolute top-4 left-1/2 z-10 -translate-x-1/2 rounded-full border border-white/10 bg-black/70 px-3 py-1.5 text-[11px] font-bold text-white shadow-2xl backdrop-blur-md pointer-events-none">
+                        {copyStatus}
+                    </div>
+                )}
                 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.08)_0,transparent_32%),linear-gradient(45deg,rgba(255,255,255,0.035)_25%,transparent_25%,transparent_75%,rgba(255,255,255,0.035)_75%),linear-gradient(45deg,rgba(255,255,255,0.035)_25%,transparent_25%,transparent_75%,rgba(255,255,255,0.035)_75%)] bg-[length:auto,28px_28px,28px_28px] bg-[position:center,0_0,14px_14px] opacity-50 pointer-events-none" />
                 <div className="absolute inset-0 flex items-center justify-center p-6 md:p-10 pointer-events-none">
                     <img
                         src={src}
                         alt={alt || 'Preview image'}
-                        className="max-w-full max-h-full object-contain rounded-2xl shadow-[0_30px_120px_rgba(0,0,0,0.75)] will-change-transform pointer-events-none"
+                        className="max-w-full max-h-full object-contain rounded-2xl shadow-[0_30px_120px_rgba(0,0,0,0.75)] will-change-transform pointer-events-auto"
                         style={{
                             transform: `translate3d(${offset.x}px, ${offset.y}px, 0) rotate(${rotation}deg) scale(${scale})`,
                             transformOrigin: 'center center',

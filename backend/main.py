@@ -174,6 +174,10 @@ def _round_down_to_multiple(value: float, multiple: int = 16) -> int:
     return max(multiple, int(value // multiple) * multiple)
 
 
+def _round_to_multiple(value: float, multiple: int = 16) -> int:
+    return max(multiple, int(round(value / multiple)) * multiple)
+
+
 def resolve_gpt_image_2_size(aspect_ratio: Optional[str], image_size: Optional[str]) -> str:
     raw_size = str(image_size or "").strip().lower()
     if raw_size == "auto":
@@ -206,15 +210,19 @@ def resolve_gpt_image_2_size(aspect_ratio: Optional[str], image_size: Optional[s
         return "1024x1024"
 
     tier = str(image_size or "1K").strip().upper()
+    is_banner_1472_608 = abs((width_ratio / height_ratio) - (46 / 19)) < 0.001
+    if is_banner_1472_608 and tier not in {"2K", "4K"}:
+        tier = "2K"
+
     if tier == "4K":
         max_edge = 3840
         max_pixels = 8294400
         if width_ratio >= height_ratio:
             width = max_edge
-            height = _round_down_to_multiple(width * height_ratio / width_ratio)
+            height = _round_to_multiple(width * height_ratio / width_ratio)
         else:
             height = max_edge
-            width = _round_down_to_multiple(height * width_ratio / height_ratio)
+            width = _round_to_multiple(height * width_ratio / height_ratio)
 
         while width * height > max_pixels:
             width = _round_down_to_multiple(width - 16)
@@ -229,8 +237,8 @@ def resolve_gpt_image_2_size(aspect_ratio: Optional[str], image_size: Optional[s
             return "2048x2048"
         long_edge = 2048
         if width_ratio > height_ratio:
-            return f"{long_edge}x{_round_down_to_multiple(long_edge * height_ratio / width_ratio)}"
-        return f"{_round_down_to_multiple(long_edge * width_ratio / height_ratio)}x{long_edge}"
+            return f"{long_edge}x{_round_to_multiple(long_edge * height_ratio / width_ratio)}"
+        return f"{_round_to_multiple(long_edge * width_ratio / height_ratio)}x{long_edge}"
 
     if width_ratio == height_ratio:
         return "1024x1024"
@@ -471,7 +479,17 @@ def decode_image_reference_to_bytes(image_ref: str) -> bytes:
     raw_image = value
     if raw_image.startswith("data:") and "," in raw_image:
         raw_image = raw_image.split(",", 1)[1]
-    return base64.b64decode(raw_image)
+    raw_image = raw_image.strip()
+    if not raw_image:
+        raise ValueError("empty base64 image data")
+    try:
+        ascii_payload = raw_image.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("不是有效图片引用：请传入真实图片 URL 或 data:image/base64，不要传“产品图1”这类占位文字")
+    try:
+        return base64.b64decode(ascii_payload, validate=True)
+    except Exception as decode_err:
+        raise ValueError(f"不是有效 base64 图片数据: {decode_err}")
 
 
 def decode_image_references_to_bytes(images: List[str]) -> List[bytes]:

@@ -65,6 +65,8 @@ export const PropertiesPanel = () => {
     ? "此模型会把这里的档位映射为供应商的清晰度参数。"
     : '';
   const isGptImage2Model = String(selectedNode.data.config?.modelId || '').toLowerCase().startsWith('gpt-image-2');
+  const selectedAspectRatio = selectedNode.data.config.aspectRatio || '1:1';
+  const isGptBannerAspectRatio = isGptImage2Model && selectedAspectRatio === '46:19';
 
   const isPromptProtected = selectedNode.data.type === NodeType.AI_CHAT && !isPromptVaultUnlocked;
   const hasImageReferenceInput = selectedNode.data.type === NodeType.AI_IMAGE && !!selectedNode.data.inputs?.image;
@@ -86,6 +88,18 @@ export const PropertiesPanel = () => {
   const handleConfigChange = (key: string, value: any) => {
     updateNodeData(selectedNode.id, {
       config: { ...selectedNode.data.config, [key]: value }
+    });
+  };
+
+  const handleAspectRatioChange = (value: string) => {
+    updateNodeData(selectedNode.id, {
+      config: {
+        ...selectedNode.data.config,
+        aspectRatio: value,
+        ...(isGptImage2Model && value === '46:19' && !['2K', '4K'].includes(selectedNode.data.config.imageSize || '')
+          ? { imageSize: '2K' }
+          : {}),
+      }
     });
   };
 
@@ -241,6 +255,7 @@ export const PropertiesPanel = () => {
                       { label: '4:5', value: '4:5' },
                       { label: '5:4', value: '5:4' },
                       { label: '21:9', value: '21:9' },
+                      { label: '46:19', value: '46:19' },
                       { label: '1:4', value: '1:4' },
                       { label: '4:1', value: '4:1' },
                       { label: '1:8', value: '1:8' },
@@ -248,7 +263,7 @@ export const PropertiesPanel = () => {
                     ]
                       .filter(ratio => !capabilities.allowedAspectRatios || capabilities.allowedAspectRatios.includes(ratio.value))
                       .map((ratio) => {
-                        const isExtreme = ['21:9', '1:4', '4:1', '1:8', '8:1'].includes(ratio.value);
+                        const isExtreme = ['21:9', '46:19', '1:4', '4:1', '1:8', '8:1'].includes(ratio.value);
                         const extremeLabel: Record<string, string> = {
                           '21:9': '宽幅', '1:4': '超高', '4:1': '超宽',
                           '1:8': '极高', '8:1': '极宽'
@@ -256,8 +271,8 @@ export const PropertiesPanel = () => {
                         return (
                           <button
                             key={ratio.value}
-                            onClick={() => handleConfigChange('aspectRatio', ratio.value)}
-                            className={`h-10 rounded-lg border transition-all flex flex-col items-center justify-center ${(selectedNode.data.config.aspectRatio || '1:1') === ratio.value
+                            onClick={() => handleAspectRatioChange(ratio.value)}
+                            className={`h-10 rounded-lg border transition-all flex flex-col items-center justify-center ${selectedAspectRatio === ratio.value
                               ? 'bg-indigo-500 border-indigo-400 text-white shadow-[0_4px_12px_rgba(99,102,241,0.3)]'
                               : 'bg-[#0b0b0f] border-[#1e1e2d] text-gray-500 hover:border-gray-500'
                               }`}
@@ -286,6 +301,7 @@ export const PropertiesPanel = () => {
                         { label: '4K', value: '4K', desc: '超高清' },
                       ]
                         .filter(size => !capabilities.allowedImageSizes || capabilities.allowedImageSizes.includes(size.value))
+                        .filter(size => !isGptBannerAspectRatio || ['2K', '4K'].includes(size.value))
                         .map((q) => (
                           <button
                             key={q.value}

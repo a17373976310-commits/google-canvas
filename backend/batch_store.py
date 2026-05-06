@@ -49,6 +49,7 @@ def normalize_batch_item(raw: Any, index: int) -> Dict[str, Any]:
     title = str(item.get("title") or f"任务 {index + 1}").strip() or f"任务 {index + 1}"
     status = str(item.get("status") or "draft").strip() or "draft"
     image_urls = item.get("imageUrls")
+    image_refs = item.get("imageRefs")
     return {
         "id": str(item.get("id") or f"item-{index + 1}"),
         "title": title,
@@ -56,6 +57,7 @@ def normalize_batch_item(raw: Any, index: int) -> Dict[str, Any]:
         "aspectRatio": str(item.get("aspectRatio") or "1:1").strip() or "1:1",
         "imageSize": str(item.get("imageSize") or "1K").strip() or "1K",
         "imageUrls": image_urls if isinstance(image_urls, list) else [],
+        "imageRefs": image_refs if isinstance(image_refs, list) else [],
         "status": status,
         "error": str(item.get("error") or ""),
         "result": item.get("result"),
@@ -79,6 +81,9 @@ def normalize_batch_row(payload: Dict[str, Any], existing: Optional[Dict[str, An
     document_assets = payload.get("documentAssets")
     if not isinstance(document_assets, list):
         document_assets = (existing or {}).get("documentAssets") if isinstance((existing or {}).get("documentAssets"), list) else []
+    file_read_issues = payload.get("fileReadIssues")
+    if not isinstance(file_read_issues, list):
+        file_read_issues = (existing or {}).get("fileReadIssues") if isinstance((existing or {}).get("fileReadIssues"), list) else []
     reference_image_count = int(
         payload.get("referenceImageCount")
         or len(reference_images)
@@ -96,6 +101,7 @@ def normalize_batch_row(payload: Dict[str, Any], existing: Optional[Dict[str, An
         "referenceImageCount": reference_image_count,
         "referenceImages": [str(item) for item in reference_images if str(item or "").strip()][:24],
         "documentAssets": document_assets[:12],
+        "fileReadIssues": file_read_issues[:40],
         "items": items,
         "createdAt": int((existing or {}).get("createdAt") or payload.get("createdAt") or timestamp),
         "updatedAt": timestamp,

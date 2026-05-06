@@ -17,6 +17,7 @@ export type AgentBatchItemPayload = {
     aspectRatio?: string;
     imageSize?: string;
     imageUrls?: string[];
+    imageRefs?: string[];
     status?: string;
     error?: string;
     result?: any;
@@ -34,6 +35,7 @@ export type AgentBatchPayload = {
     referenceImageCount?: number;
     referenceImages?: string[];
     documentAssets?: any[];
+    fileReadIssues?: any[];
     items?: AgentBatchItemPayload[];
     approvedAt?: number | null;
 };
@@ -68,11 +70,20 @@ export class AIService {
         this.executeTimeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 0;
     }
 
-    async executeNode(nodeId: string, nodeType: string, config: any, inputs: Record<string, any>, apiSettings: ProviderApiSettings) {
-        const controller = this.executeTimeoutMs > 0 ? new AbortController() : null;
+    async executeNode(
+        nodeId: string,
+        nodeType: string,
+        config: any,
+        inputs: Record<string, any>,
+        apiSettings: ProviderApiSettings,
+        options?: { signal?: AbortSignal | null }
+    ) {
+        const internalController = this.executeTimeoutMs > 0 ? new AbortController() : null;
         const timeoutId = this.executeTimeoutMs > 0
-            ? window.setTimeout(() => controller?.abort(), this.executeTimeoutMs)
+            ? window.setTimeout(() => internalController?.abort(), this.executeTimeoutMs)
             : null;
+
+        const mergedSignal = options?.signal || internalController?.signal || undefined;
 
         let response: Response;
         try {
@@ -93,11 +104,11 @@ export class AIService {
                     reasoning_protocol: apiSettings.reasoningProtocol,
                     image_protocol: apiSettings.imageProtocol,
                 }),
-                ...(controller ? { signal: controller.signal } : {}),
+                ...(mergedSignal ? { signal: mergedSignal } : {}),
             });
         } catch (error: any) {
             if (error?.name === 'AbortError') {
-                throw new Error(`Node request timed out (${Math.round(this.executeTimeoutMs / 1000)}s). Check the model, Base URL, or network.`);
+                throw new Error(`请求被${options?.signal ? '取消' : `超时 (${Math.round(this.executeTimeoutMs / 1000)}s)`}。`);
             }
             throw error;
         } finally {

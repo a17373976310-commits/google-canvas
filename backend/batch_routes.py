@@ -33,6 +33,7 @@ class AgentBatchItemPayload(BaseModel):
     aspectRatio: str = "1:1"
     imageSize: str = "1K"
     imageUrls: List[str] = []
+    imageRefs: List[str] = []
     status: str = "draft"
     error: str = ""
     result: Optional[Any] = None
@@ -51,6 +52,7 @@ class AgentBatchPayload(BaseModel):
     referenceImageCount: int = 0
     referenceImages: List[str] = []
     documentAssets: List[Dict[str, Any]] = []
+    fileReadIssues: List[Dict[str, Any]] = []
     items: List[AgentBatchItemPayload] = []
     tasks: Optional[List[AgentBatchItemPayload]] = None
     approvedAt: Optional[int] = None

@@ -30,7 +30,7 @@ def parse_int(raw: Optional[str], default: int = 0) -> int:
         return default
 
 
-OPENAI_TIMEOUT_SECONDS = parse_optional_timeout_seconds(os.getenv("OPENAI_TIMEOUT_SECONDS"), default="120")
+OPENAI_TIMEOUT_SECONDS = parse_optional_timeout_seconds(os.getenv("OPENAI_TIMEOUT_SECONDS"), default="300")
 ASYNC_TASK_TIMEOUT_SECONDS = parse_optional_timeout_seconds(os.getenv("ASYNC_TASK_TIMEOUT_SECONDS"), default="900")
 HTTP_REQUEST_TIMEOUT_SECONDS = parse_optional_timeout_seconds(os.getenv("HTTP_REQUEST_TIMEOUT_SECONDS"), default="90")
 OPENAI_MAX_RETRIES = parse_int(os.getenv("OPENAI_MAX_RETRIES"), default=2)

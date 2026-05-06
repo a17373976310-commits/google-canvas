@@ -42,7 +42,7 @@ const GEMINI_FLASH_IMAGE_CAPABILITIES: ModelCapabilities = {
 };
 
 const GPT_IMAGE_2_CAPABILITIES: ModelCapabilities = {
-    allowedAspectRatios: ['1:1', '4:3', '3:4', '16:9', '9:16', '2:3', '3:2', '4:5', '5:4', '21:9'],
+    allowedAspectRatios: ['1:1', '4:3', '3:4', '16:9', '9:16', '2:3', '3:2', '4:5', '5:4', '21:9', '46:19'],
     allowedImageSizes: ['1K', '2K', '4K'],
     supportsImageRefs: true,
     supportsImageSize: true,

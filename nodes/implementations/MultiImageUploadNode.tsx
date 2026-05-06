@@ -7,12 +7,26 @@ import { BaseNode } from '../BaseNode';
 import { Images, X, Plus, Image as ImageIcon } from 'lucide-react';
 import { fileToOptimizedImageDataUrl } from '../../utils/imageCompression';
 
+const isRenderableImageReference = (value: string) => /^https?:\/\//i.test(value) || /^data:image\//i.test(value);
+
 export const MultiImageUploadNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected }) => {
     const updateNodeData = useStore((state) => state.updateNodeData);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // data.output is string[] (array of Base64 Data URLs)
-    const images: string[] = Array.isArray(data.output) ? data.output : [];
+    const rawImages: string[] = Array.isArray(data.output) ? data.output : [];
+    const images = rawImages.filter((item) => typeof item === 'string' && isRenderableImageReference(item.trim()));
+
+    React.useEffect(() => {
+        if (rawImages.length === images.length) return;
+        updateNodeData(id, {
+            output: images.length > 0 ? images : null,
+            status: images.length > 0 ? 'success' : 'error',
+            error: images.length > 0
+                ? '已移除无效图片引用：图片节点只能接收真实 URL 或 data:image 数据。'
+                : '图片引用无效：请重新上传真实图片，不要使用“产品图1”这类占位文字。'
+        });
+    }, [id, images, rawImages.length, updateNodeData]);
 
     const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
