@@ -435,6 +435,8 @@ const Flow = () => {
   }, []);
 
   const onPaneDoubleClick = useCallback((event: React.MouseEvent) => {
+    const target = event.target as HTMLElement;
+    if (!target.closest('.react-flow__pane')) return;
     event.preventDefault();
     openQuickNodeMenu(event.clientX, event.clientY);
   }, [openQuickNodeMenu]);
@@ -461,7 +463,7 @@ const Flow = () => {
     <div className="flex h-full w-full bg-[#0b0b0f] text-white selection:bg-indigo-500/30 overflow-hidden">
       <Sidebar />
 
-      <div className="flex-1 relative overflow-hidden h-full" ref={reactFlowWrapper}>
+      <div className="flex-1 relative overflow-hidden h-full" ref={reactFlowWrapper} onDoubleClick={onPaneDoubleClick}>
         <div className="absolute top-4 left-4 md:top-8 md:left-8 z-20 flex items-center gap-4 max-w-[calc(100vw-32px)]">
           <div className="relative flex items-center gap-3 bg-[#161621] border border-[#1e1e2d] px-4 md:px-5 py-2.5 md:py-3 rounded-2xl shadow-2xl focus-within:border-indigo-500/50 transition-all w-full md:w-auto">
             <Search size={16} className="text-gray-500" />
@@ -583,7 +585,6 @@ const Flow = () => {
           }}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
-          onPaneDoubleClick={onPaneDoubleClick}
           onPaneContextMenu={onPaneContextMenu}
           onDrop={onDrop}
           onDragOver={onDragOver}

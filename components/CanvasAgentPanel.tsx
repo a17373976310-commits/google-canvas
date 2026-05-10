@@ -1,24 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useReactFlow } from 'reactflow';
+import { AlertCircle, Bot, Check, ChevronRight, CornerDownLeft, FileText, FileUp, Link2, Loader2, MessageSquare, Paperclip, Play, Plus, Send, Settings2, Sparkles, Square, Trash2, Wrench, X } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { Bot, Copy, FilePlus2, History, ImagePlus, Loader2, Play, PlusCircle, RefreshCw, Send, Sparkles, Trash2, X } from 'lucide-react';
 import { useStore } from '../store';
-import { AIService, type AgentBatchItemPayload, type AgentBatchSummary } from '../services/aiService';
-import { NodeType } from '../types';
+import { AIService } from '../services/aiService';
 import { fileToOptimizedImageDataUrl } from '../utils/imageCompression';
-
-type AgentTask = {
-  id?: string;
-  title: string;
-  prompt: string;
-  aspectRatio?: string;
-  imageSize?: string;
-  imageUrls?: string[];
-  status?: 'draft' | 'approved' | 'running' | 'success' | 'failed';
-  error?: string;
-  result?: any;
-  nodeId?: string;
-};
+import { NodeType, StandardFilePayload } from '../types';
 
 type AgentMessage = {
   id: string;
@@ -26,46 +12,12 @@ type AgentMessage = {
   content: string;
 };
 
-type CreatedWorkflow = {
-  promptNodeIds: string[];
-  referenceNodeIds: string[];
-  imageNodeIds: string[];
-  itemIds: string[];
-};
-
-type RequirementReadResult = {
-  text: string;
-  images: string[];
-  warnings?: string[];
-};
-
-type DocumentImageAsset = {
-  id: string;
-  src: string;
-  index: number;
-  assignedTaskIds: string[];
-};
-
-type DocumentAsset = {
-  id: string;
-  fileName: string;
-  textPreview: string;
-  images: DocumentImageAsset[];
-  createdAt: number;
-};
-
-type AgentToolName = 'update_tasks' | 'expand_canvas' | 'run_batch' | 'retry_failed';
-
-type AgentToolCall = {
-  tool: AgentToolName;
-  parameters?: Record<string, any>;
-  requires_confirmation?: boolean;
-  reason?: string;
-};
-
 type CanvasAgentActionType =
   | 'update_node_config'
   | 'create_node'
+  | 'parse_spreadsheet_attachment'
+  | 'extract_spreadsheet_images'
+  | 'attach_file_to_canvas'
   | 'connect_nodes'
   | 'run_node'
   | 'run_selected'
@@ -77,8 +29,14 @@ type CanvasAgentAction = {
   nodeId?: string;
   nodeType?: string;
   sourceId?: string;
+  sourceHandle?: string;
   targetId?: string;
+  targetHandle?: string;
   connectFromId?: string;
+  attachmentId?: string;
+  attachmentIds?: string[];
+  spreadsheetImageIds?: string[];
+  maxImages?: number;
   config?: Record<string, any>;
   prompt?: string;
   label?: string;
@@ -87,119 +45,425 @@ type CanvasAgentAction = {
   reason?: string;
 };
 
-type AgentValidation = {
-  passed: boolean;
-  errors: string[];
-  warnings: string[];
+type CanvasToolResult = {
+  tool: CanvasAgentActionType;
+  ok: boolean;
+  message: string;
+  nodeId?: string;
+  nodeIds?: string[];
 };
 
-type AgentPanelTab = 'chat' | 'tasks' | 'history';
+type PendingCanvasRequest = {
+  actions: CanvasAgentAction[];
+  reason: string;
+  userText: string;
+  conversation: AgentMessage[];
+  previousResults: CanvasToolResult[];
+};
 
-type PersistedAgentDraft = {
-  batchId?: string | null;
-  batchStatus?: string;
-  requirementText: string;
-  tasks: AgentTask[];
+type AgentAttachment = {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  kind: StandardFilePayload['type'];
+  payload: StandardFilePayload;
+  modelSummary: string;
+  spreadsheet?: SpreadsheetAttachmentAnalysis;
+  spreadsheetImages?: SpreadsheetExtractedImage[];
+};
+
+type SpreadsheetExtractedImage = {
+  id: string;
+  sheetName: string;
+  mediaPath: string;
+  mime: string;
+  dataUrl: string;
+  rowIndex: number;
+  columnIndex: number;
+  rowNumber: number;
+  columnNumber: number;
+  name?: string;
+};
+
+type SpreadsheetColumnRole = 'task' | 'prompt' | 'size' | 'style' | 'reference' | 'image' | 'product' | 'unknown';
+
+type SpreadsheetSheetAnalysis = {
+  name: string;
+  rowCount: number;
+  columnCount: number;
+  headerRowIndex: number;
+  headers: string[];
+  detectedColumns: Array<{
+    index: number;
+    header: string;
+    role: SpreadsheetColumnRole;
+  }>;
+  sampleRows: Record<string, string>[];
+};
+
+type SpreadsheetAttachmentAnalysis = {
+  sheetCount: number;
+  embeddedImageCount: number;
+  sheets: SpreadsheetSheetAnalysis[];
+  taskLikeRowCount: number;
   summary: string;
-  messages: AgentMessage[];
-  referenceImages?: string[];
-  documentAssets?: DocumentAsset[];
-  storedReferenceImageCount?: number;
-  savedAt: number;
 };
 
-const renderFormattedMessage = (content: string) => {
-  if (!content) return null;
+const ACTION_TYPES = new Set<CanvasAgentActionType>([
+  'update_node_config',
+  'create_node',
+  'parse_spreadsheet_attachment',
+  'extract_spreadsheet_images',
+  'attach_file_to_canvas',
+  'connect_nodes',
+  'run_node',
+  'run_selected',
+  'run_all_image_nodes',
+  'explain_canvas',
+]);
 
-  // 检测是否为结构化回复（包含分段标题如 "# " 或 "**" 开头）
-  const hasStructure = /^(#{1,3}\s+|#{0,3}\s*[一-龥a-zA-Z]{2,}:|#{0,3}\s*[-—]\s)/m.test(content) || content.includes('**');
+const MAX_AGENT_STEPS = 4;
 
-  if (hasStructure) {
-    // 结构化渲染：分段处理
-    const blocks = content.split(/(?=^#{1,3}\s+|^(?!.{1,3}$)[^#\n]+[：:]\s*$)/gm);
-    return (
-      <div className="space-y-3">
-        {blocks.map((block, i) => {
-          const trimmed = block.trim();
-          if (!trimmed) return null;
+const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-          // 主标题（# 开头）
-          if (/^#{1,3}\s+/.test(trimmed)) {
-            const level = (trimmed.match(/^(#{1,3})/)?.[1] || '').length;
-            const text = trimmed.replace(/^#{1,3}\s+/, '');
-            const sizeClass = level === 1 ? 'text-sm font-black text-cyan-100 border-b border-cyan-400/20 pb-1.5' :
-                              level === 2 ? 'text-[11px] font-black text-white' :
-                              'text-[10px] font-bold text-gray-300';
-            return <div key={i} className={sizeClass}>{renderInline(text)}</div>;
-          }
+const isTextLikeFile = (file: File) => (
+  file.type.startsWith('text/')
+  || /\.(txt|md|json|csv|tsv|yaml|yml|html|css|js|ts|tsx|jsx|py|xml)$/i.test(file.name)
+);
 
-          // 列表项（- 或 • 开头）
-          if (/^[\-\•]\s/.test(trimmed)) {
-            const items = trimmed.split('\n').filter(l => /^[-\•]\s/.test(l));
-            return (
-              <ul key={i} className="ml-3 space-y-1">
-                {items.map((item, j) => (
-                  <li key={j} className="flex items-start gap-2 text-[10px] text-gray-300">
-                    <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-cyan-400/60"></span>
-                    <span>{renderInline(item.replace(/^[-\•]\s+/, ''))}</span>
-                  </li>
-                ))}
-              </ul>
-            );
-          }
+const readFileAsText = (file: File) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result || ''));
+  reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+  reader.readAsText(file);
+});
 
-          // 普通段落
-          return <p key={i} className="text-[10px] leading-relaxed text-gray-300">{renderInline(trimmed)}</p>;
-        })}
-      </div>
-    );
+const readFileAsArrayBuffer = (file: File) => new Promise<ArrayBuffer>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result as ArrayBuffer);
+  reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+  reader.readAsArrayBuffer(file);
+});
+
+const formatFileSize = (size: number) => {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+};
+
+const normalizeCellText = (value: any) => String(value ?? '').replace(/\s+/g, ' ').trim();
+
+const bytesToBase64 = (bytes: Uint8Array) => {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...Array.from(chunk));
+  }
+  return btoa(binary);
+};
+
+const fileEntryToBytes = (entry: any): Uint8Array => {
+  const content = entry?.content ?? entry;
+  if (!content) return new Uint8Array();
+  if (content instanceof Uint8Array) return content;
+  if (content instanceof ArrayBuffer) return new Uint8Array(content);
+  if (Array.isArray(content)) return new Uint8Array(content);
+  if (typeof content === 'string') return new TextEncoder().encode(content);
+  return new Uint8Array();
+};
+
+const fileEntryToText = (entry: any) => new TextDecoder().decode(fileEntryToBytes(entry));
+
+const getXmlAttr = (tag: string, attrName: string) => {
+  const escaped = attrName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = tag.match(new RegExp(`\\b${escaped}="([^"]*)"`, 'i'));
+  return match?.[1] || '';
+};
+
+const parseRelationships = (xml: string) => {
+  const relationships: Array<{ id: string; type: string; target: string }> = [];
+  const regex = /<Relationship\b[^>]*\/?>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml))) {
+    const tag = match[0];
+    relationships.push({
+      id: getXmlAttr(tag, 'Id'),
+      type: getXmlAttr(tag, 'Type'),
+      target: getXmlAttr(tag, 'Target'),
+    });
+  }
+  return relationships.filter((relationship) => relationship.id && relationship.target);
+};
+
+const resolvePackagePath = (baseDir: string, target: string) => {
+  if (target.startsWith('/')) return target.replace(/^\/+/, '');
+  const parts = `${baseDir}/${target}`.split('/');
+  const resolved: string[] = [];
+  parts.forEach((part) => {
+    if (!part || part === '.') return;
+    if (part === '..') resolved.pop();
+    else resolved.push(part);
+  });
+  return resolved.join('/');
+};
+
+const mimeFromMediaPath = (path: string) => {
+  const ext = path.split('.').pop()?.toLowerCase();
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'bmp') return 'image/bmp';
+  if (ext === 'svg') return 'image/svg+xml';
+  return 'image/png';
+};
+
+const extractSpreadsheetImagesFromWorkbook = (
+  workbook: XLSX.WorkBook,
+  files: Record<string, any>,
+  attachmentId: string
+): SpreadsheetExtractedImage[] => {
+  const images: SpreadsheetExtractedImage[] = [];
+  workbook.SheetNames.forEach((sheetName, index) => {
+    const sheetNumber = index + 1;
+    const sheetRelPath = `xl/worksheets/_rels/sheet${sheetNumber}.xml.rels`;
+    const sheetRelsXml = fileEntryToText(files[sheetRelPath]);
+    const drawingRel = parseRelationships(sheetRelsXml)
+      .find((relationship) => /\/drawing$/i.test(relationship.type) || /\/drawingml\/2006\/spreadsheetDrawing$/i.test(relationship.type));
+    if (!drawingRel) return;
+
+    const drawingPath = resolvePackagePath('xl/worksheets', drawingRel.target);
+    const drawingXml = fileEntryToText(files[drawingPath]);
+    const drawingRelPath = drawingPath.replace(/^(.+\/)([^/]+)$/, '$1_rels/$2.rels');
+    const mediaByRelId = new Map(parseRelationships(fileEntryToText(files[drawingRelPath]))
+      .filter((relationship) => /\/image$/i.test(relationship.type))
+      .map((relationship) => [relationship.id, resolvePackagePath('xl/drawings', relationship.target)]));
+
+    const anchorRegex = /<xdr:(?:oneCellAnchor|twoCellAnchor)\b[\s\S]*?<\/xdr:(?:oneCellAnchor|twoCellAnchor)>/gi;
+    let anchorMatch: RegExpExecArray | null;
+    while ((anchorMatch = anchorRegex.exec(drawingXml))) {
+      const anchorXml = anchorMatch[0];
+      const embedId = anchorXml.match(/(?:r:embed|embed)="([^"]+)"/i)?.[1] || '';
+      const mediaPath = mediaByRelId.get(embedId);
+      if (!mediaPath || !files[mediaPath]) continue;
+
+      const fromXml = anchorXml.match(/<xdr:from\b[^>]*>([\s\S]*?)<\/xdr:from>/i)?.[1] || '';
+      const rowIndex = Number(fromXml.match(/<xdr:row\b[^>]*>(\d+)<\/xdr:row>/i)?.[1] || 0);
+      const columnIndex = Number(fromXml.match(/<xdr:col\b[^>]*>(\d+)<\/xdr:col>/i)?.[1] || 0);
+      const name = anchorXml.match(/<xdr:cNvPr\b[^>]*\bname="([^"]*)"/i)?.[1] || undefined;
+      const bytes = fileEntryToBytes(files[mediaPath]);
+      if (bytes.length === 0) continue;
+      const mime = mimeFromMediaPath(mediaPath);
+      images.push({
+        id: `${attachmentId}-image-${images.length + 1}`,
+        sheetName,
+        mediaPath,
+        mime,
+        dataUrl: `data:${mime};base64,${bytesToBase64(bytes)}`,
+        rowIndex,
+        columnIndex,
+        rowNumber: rowIndex + 1,
+        columnNumber: columnIndex + 1,
+        name,
+      });
+    }
+  });
+
+  return images.sort((a, b) => (
+    a.sheetName.localeCompare(b.sheetName) || a.rowIndex - b.rowIndex || a.columnIndex - b.columnIndex
+  ));
+};
+
+const detectSpreadsheetColumnRole = (header: string, samples: string[]): SpreadsheetColumnRole => {
+  const text = `${header} ${samples.slice(0, 6).join(' ')}`.toLowerCase();
+  if (/(需求|要求|任务|描述|说明|brief|requirement|task|description)/i.test(text)) return 'task';
+  if (/(提示词|prompt|画面|生成|文案|copy|caption)/i.test(text)) return 'prompt';
+  if (/(尺寸|比例|画幅|规格|size|ratio|aspect|分辨率)/i.test(text)) return 'size';
+  if (/(风格|调性|色调|参考风格|style|tone|palette)/i.test(text)) return 'style';
+  if (/(参考|素材|链接|url|reference|asset|source)/i.test(text)) return 'reference';
+  if (/(图片|图像|配图|主图|image|photo|pic)/i.test(text)) return 'image';
+  if (/(产品|商品|品名|sku|product|item|name)/i.test(text)) return 'product';
+  return 'unknown';
+};
+
+const findHeaderRowIndex = (rows: any[][]) => {
+  const limit = Math.min(rows.length, 12);
+  let bestIndex = 0;
+  let bestScore = -1;
+  for (let index = 0; index < limit; index += 1) {
+    const row = rows[index] || [];
+    const filled = row.filter((cell) => normalizeCellText(cell)).length;
+    const keywordScore = row.reduce((score, cell) => {
+      const text = normalizeCellText(cell);
+      return score + (/(需求|任务|尺寸|文案|图片|参考|产品|prompt|size|image|task)/i.test(text) ? 2 : 0);
+    }, 0);
+    const score = filled + keywordScore;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+};
+
+const buildSpreadsheetAnalysis = (workbook: XLSX.WorkBook, embeddedImageCount: number): SpreadsheetAttachmentAnalysis => {
+  const sheets = workbook.SheetNames.map((sheetName): SpreadsheetSheetAnalysis => {
+    const worksheet = workbook.Sheets[sheetName];
+    const rows = worksheet ? XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: '' }) : [];
+    const headerRowIndex = findHeaderRowIndex(rows);
+    const headerRow = rows[headerRowIndex] || [];
+    const columnCount = Math.max(...rows.map((row) => row.length), headerRow.length, 0);
+    const headers = Array.from({ length: columnCount }).map((_, index) => (
+      normalizeCellText(headerRow[index]) || `列${index + 1}`
+    ));
+    const bodyRows = rows.slice(headerRowIndex + 1).filter((row) => row.some((cell) => normalizeCellText(cell)));
+    const sampleRows = bodyRows.slice(0, 50).map((row) => headers.reduce<Record<string, string>>((acc, header, index) => {
+      const value = normalizeCellText(row[index]);
+      if (value) acc[header] = value;
+      return acc;
+    }, {}));
+    const detectedColumns = headers.map((header, index) => ({
+      index,
+      header,
+      role: detectSpreadsheetColumnRole(header, bodyRows.map((row) => normalizeCellText(row[index]))),
+    }));
+
+    return {
+      name: sheetName,
+      rowCount: rows.length,
+      columnCount,
+      headerRowIndex,
+      headers,
+      detectedColumns,
+      sampleRows,
+    };
+  });
+  const taskLikeRowCount = sheets.reduce((total, sheet) => {
+    const hasTaskColumn = sheet.detectedColumns.some((column) => ['task', 'prompt', 'product'].includes(column.role));
+    return total + (hasTaskColumn ? Math.max(0, sheet.rowCount - sheet.headerRowIndex - 1) : 0);
+  }, 0);
+  const summary = [
+    `识别到 ${sheets.length} 个工作表。`,
+    `估算任务行 ${taskLikeRowCount} 条。`,
+    embeddedImageCount > 0 ? `发现表内嵌图片约 ${embeddedImageCount} 张。` : '未发现表内嵌图片。',
+    ...sheets.slice(0, 4).map((sheet) => {
+      const roles = sheet.detectedColumns
+        .filter((column) => column.role !== 'unknown')
+        .map((column) => `${column.header}=${column.role}`)
+        .join('、') || '未识别关键列';
+      return `${sheet.name}：${sheet.rowCount} 行、${sheet.columnCount} 列；${roles}`;
+    }),
+  ].join('\n');
+
+  return {
+    sheetCount: sheets.length,
+    embeddedImageCount,
+    sheets,
+    taskLikeRowCount,
+    summary,
+  };
+};
+
+const buildAttachmentFromFile = async (file: File): Promise<AgentAttachment> => {
+  const id = `attachment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const normalizedName = file.name.toLowerCase();
+  const isImage = file.type.startsWith('image/');
+  const isVideo = file.type.startsWith('video/');
+  const isExcel = normalizedName.endsWith('.xlsx')
+    || normalizedName.endsWith('.xls')
+    || normalizedName.endsWith('.csv')
+    || file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    || file.type === 'application/vnd.ms-excel'
+    || file.type === 'text/csv';
+
+  let kind: StandardFilePayload['type'] = 'generic';
+  if (isImage) kind = 'image';
+  else if (isVideo) kind = 'video';
+  else if (isExcel) kind = 'xlsx';
+
+  const payload: StandardFilePayload = {
+    id,
+    createdAt: Date.now(),
+    source: 'local',
+    type: kind,
+    name: file.name,
+    size: file.size,
+    mime: file.type || 'application/octet-stream',
+  };
+  let modelSummary = `${file.name} (${kind}, ${formatFileSize(file.size)})`;
+  let spreadsheet: SpreadsheetAttachmentAnalysis | undefined;
+  let spreadsheetImages: SpreadsheetExtractedImage[] | undefined;
+
+  if (isImage) {
+    const dataUrl = await fileToOptimizedImageDataUrl(file);
+    payload.url = dataUrl;
+    payload.data = dataUrl;
+    modelSummary = `${file.name}：图片附件，可作为画布图片输入。`;
+  } else if (isExcel) {
+    const buffer = await readFileAsArrayBuffer(file);
+    const workbook = XLSX.read(buffer, { type: 'array', bookFiles: true });
+    const workbookFiles = ((workbook as any).files || {}) as Record<string, any>;
+    const firstSheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[firstSheetName];
+    const rows = worksheet ? XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 }) : [];
+    const embeddedImageCount = Object.keys(workbookFiles)
+      .filter((key) => /^xl\/media\//i.test(String(key)))
+      .length;
+    spreadsheet = buildSpreadsheetAnalysis(workbook, embeddedImageCount);
+    spreadsheetImages = extractSpreadsheetImagesFromWorkbook(workbook, workbookFiles, id);
+    payload.previewData = rows.slice(0, 8);
+    payload.meta = {
+      sheetName: firstSheetName,
+      sheetNames: workbook.SheetNames,
+      sheetCount: workbook.SheetNames.length,
+      rowCount: rows.length,
+      columns: rows[0]?.length || 0,
+      embeddedImageCount,
+      extractedImageCount: spreadsheetImages.length,
+      spreadsheetSummary: spreadsheet.summary,
+      sheetSummaries: spreadsheet.sheets.map((sheet) => ({
+        name: sheet.name,
+        rowCount: sheet.rowCount,
+        columnCount: sheet.columnCount,
+        headers: sheet.headers,
+        detectedColumns: sheet.detectedColumns,
+      })),
+    };
+    modelSummary = `${file.name}：表格附件。\n${spreadsheet.summary}\n已提取表内图片 ${spreadsheetImages.length} 张。\n首个工作表预览：${JSON.stringify(payload.previewData).slice(0, 900)}`;
+  } else if (isTextLikeFile(file) && file.size <= 512 * 1024) {
+    const text = await readFileAsText(file);
+    payload.data = clampText(text, 4000);
+    modelSummary = `${file.name}：文本附件预览：\n${payload.data}`;
+  } else {
+    payload.url = URL.createObjectURL(file);
+    modelSummary = `${file.name}：文件附件，类型 ${payload.mime}，大小 ${formatFileSize(file.size)}。`;
   }
 
-  // 非结构化：逐行渲染
-  const lines = content.split('\n');
-  return lines.map((line, j) => {
-    if (!line.trim()) return <div key={j} className="h-2" />;
-    return <p key={j} className="text-[10px] leading-relaxed text-gray-300">{renderInline(line)}</p>;
-  });
+  return {
+    id,
+    name: file.name,
+    size: file.size,
+    mime: payload.mime,
+    kind,
+    payload,
+    modelSummary,
+    spreadsheet,
+    spreadsheetImages,
+  };
 };
 
-const renderInline = (text: string) => {
-  const bold = text.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-white">$1</strong>');
-  const inline = bold.replace(/`([^`]+)`/g, '<code class="mx-1 rounded bg-black/50 px-1.5 py-0.5 text-[9px] text-amber-200 font-mono">$1</code>');
-  return <span dangerouslySetInnerHTML={{ __html: inline }} />;
-};
-
-const CANVAS_AGENT_STORAGE_KEY = 'canvas-agent-batch-draft-v1';
-const SUPPORTED_ASPECT_RATIOS = new Set(['1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3', '4:5', '5:4', '21:9']);
-
-const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-const clampText = (value: string, max = 26000) => (
-  value.length > max ? `${value.slice(0, max)}\n\n...[内容过长，已截断]` : value
+const clampText = (value: string, max = 900) => (
+  value.length > max ? `${value.slice(0, max)}...` : value
 );
 
 const stripCodeFence = (value: string) => (
-  value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+  value
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim()
 );
-
-const extractImageUrlsFromText = (text: string) => (
-  Array.from(text.matchAll(/https?:\/\/[^\s"'<>，。；、)）\]]+/gi))
-    .map((match) => match[0])
-);
-
-const mergeUniqueImages = (...groups: Array<Array<string | undefined | null> | undefined>) => {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  groups.forEach((group) => {
-    (group || []).forEach((item) => {
-      const value = String(item || '').trim();
-      if (!value || seen.has(value)) return;
-      seen.add(value);
-      result.push(value);
-    });
-  });
-  return result;
-};
 
 const extractJsonObject = (value: string) => {
   const cleaned = stripCodeFence(value);
@@ -211,410 +475,13 @@ const extractJsonObject = (value: string) => {
     if (start >= 0 && end > start) {
       return JSON.parse(cleaned.slice(start, end + 1));
     }
-    throw new Error('模型没有返回可解析的 JSON');
+    throw new Error('No JSON object found');
   }
 };
 
-const readPersistedDraft = (): PersistedAgentDraft | null => {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(CANVAS_AGENT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return null;
-    return {
-      requirementText: String(parsed.requirementText || ''),
-      batchId: parsed.batchId ? String(parsed.batchId) : null,
-      batchStatus: String(parsed.batchStatus || 'draft'),
-      tasks: Array.isArray(parsed.tasks)
-        ? parsed.tasks.map(normalizeTask).filter((task: AgentTask | null): task is AgentTask => !!task)
-        : [],
-      summary: String(parsed.summary || ''),
-      messages: Array.isArray(parsed.messages) ? parsed.messages.slice(-30) : [],
-      referenceImages: Array.isArray(parsed.referenceImages) ? parsed.referenceImages.map(String).filter(Boolean) : [],
-      documentAssets: Array.isArray(parsed.documentAssets) ? parsed.documentAssets as DocumentAsset[] : [],
-      storedReferenceImageCount: Number(parsed.storedReferenceImageCount || parsed.referenceImageCount || 0),
-      savedAt: Number(parsed.savedAt || Date.now())
-    };
-  } catch {
-    return null;
-  }
-};
-
-const persistDraft = (draft: PersistedAgentDraft) => {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(CANVAS_AGENT_STORAGE_KEY, JSON.stringify(draft));
-  } catch {
-    // LocalStorage can exceed quota if users paste huge sheets. The live session still works.
-  }
-};
-
-const normalizeTask = (item: any, index: number): AgentTask | null => {
-  const prompt = String(item?.prompt || item?.requirement || item?.description || '').trim();
-
-  const rawImageFields = [
-    ...(Array.isArray(item?.imageUrls) ? item.imageUrls : []),
-    ...(Array.isArray(item?.images) ? item.images : []),
-    ...(Array.isArray(item?.referenceImages) ? item.referenceImages : []),
-    item?.imageUrl,
-    item?.image,
-    ...extractImageUrlsFromText(prompt)
-  ];
-  const imageUrls = mergeUniqueImages(rawImageFields.map((url: unknown) => String(url || '').trim()));
-
-  return {
-    title: String(item?.title || item?.name || `任务 ${index + 1}`).trim() || `任务 ${index + 1}`,
-    prompt,
-    aspectRatio: String(item?.aspectRatio || item?.ratio || '1:1').trim() || '1:1',
-    imageSize: String(item?.imageSize || item?.size || '1K').trim() || '1K',
-    imageUrls,
-    id: String(item?.id || `item-${index + 1}`),
-    status: (String(item?.status || 'draft') as AgentTask['status']) || 'draft',
-    error: String(item?.error || ''),
-    result: item?.result,
-    nodeId: String(item?.nodeId || '')
-  };
-};
-
-const validateAgentTasks = (tasks: AgentTask[], referenceImageCount = 0): AgentValidation => {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-  const seenPrompts = new Set<string>();
-
-  if (tasks.length === 0) {
-    errors.push('还没有可执行的出图任务。');
-  }
-
-  tasks.forEach((task, index) => {
-    const label = task.title || `任务 ${index + 1}`;
-    const prompt = task.prompt.trim();
-    if (!prompt) {
-      errors.push(`${label} 的提示词为空。`);
-      return;
-    }
-    if (/同上|同前|如上|保持上一张|参考上一条/.test(prompt)) {
-      errors.push(`${label} 的提示词依赖上一条内容，不是自包含提示词。`);
-    }
-    if (prompt.length < 12) {
-      warnings.push(`${label} 的提示词过短，可能无法稳定出图。`);
-    }
-    const normalizedPrompt = prompt.replace(/\s+/g, ' ');
-    if (seenPrompts.has(normalizedPrompt)) {
-      warnings.push(`${label} 与前面任务提示词完全重复。`);
-    }
-    seenPrompts.add(normalizedPrompt);
-
-    const aspectRatio = String(task.aspectRatio || '').trim();
-    if (aspectRatio && !SUPPORTED_ASPECT_RATIOS.has(aspectRatio) && !/^\d+:\d+$/.test(aspectRatio)) {
-      warnings.push(`${label} 的比例“${aspectRatio}”可能不被当前图像模型支持。`);
-    }
-  });
-
-  if (referenceImageCount > 1 && tasks.length > 1 && referenceImageCount !== tasks.length) {
-    warnings.push(`当前有 ${referenceImageCount} 张参考图和 ${tasks.length} 个任务，数量不一致；系统会把参考图作为整批共享参考。`);
-  }
-
-  return { passed: errors.length === 0, errors, warnings };
-};
-
-const formatValidationMessage = (validation: AgentValidation) => [
-  validation.errors.length > 0 ? `阻止执行：${validation.errors.join('；')}` : '',
-  validation.warnings.length > 0 ? `提醒：${validation.warnings.join('；')}` : ''
-].filter(Boolean).join('\n');
-
-const formatBatchTime = (value?: number) => {
-  if (!value) return '未知时间';
-  const timestamp = value < 10_000_000_000 ? value * 1000 : value;
-  return new Date(timestamp).toLocaleString();
-};
-
-const getBatchStatusLabel = (status?: string) => {
-  const map: Record<string, string> = {
-    draft: '草稿',
-    approved: '已确认',
-    running: '运行中',
-    success: '已完成',
-    partial: '部分失败',
-    failed: '失败'
-  };
-  return map[String(status || 'draft')] || String(status || '草稿');
-};
-
-const getBatchStatusClass = (status?: string) => {
-  if (status === 'success') return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200';
-  if (status === 'partial' || status === 'failed') return 'border-rose-400/20 bg-rose-400/10 text-rose-200';
-  if (status === 'running') return 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200';
-  return 'border-white/10 bg-white/[0.06] text-gray-300';
-};
-
-const getTaskStatusLabel = (status?: string) => {
-  const map: Record<string, string> = {
-    draft: '草稿',
-    approved: '已确认',
-    running: '运行中',
-    success: '已完成',
-    failed: '失败'
-  };
-  return map[String(status || 'draft')] || String(status || '草稿');
-};
-
-const getTaskStatusClass = (status?: string) => {
-  if (status === 'success') return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200';
-  if (status === 'failed') return 'border-rose-400/20 bg-rose-400/10 text-rose-200';
-  if (status === 'running') return 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200';
-  if (status === 'approved') return 'border-violet-300/20 bg-violet-300/10 text-violet-100';
-  return 'border-white/10 bg-white/[0.05] text-gray-400';
-};
-
-const formatStatusCounts = (counts?: Record<string, number>) => {
-  if (!counts) return '';
-  const parts = [
-    counts.success ? `成功 ${counts.success}` : '',
-    counts.failed ? `失败 ${counts.failed}` : '',
-    counts.running ? `运行中 ${counts.running}` : '',
-    counts.draft ? `草稿 ${counts.draft}` : '',
-  ].filter(Boolean);
-  return parts.join(' / ');
-};
-
-const buildFallbackTasks = (text: string): AgentTask[] => {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !/^[-=]{3,}$/.test(line));
-
-  const candidates = lines.length > 1 ? lines : text.split(/[。；;]/).map((line) => line.trim()).filter(Boolean);
-  return candidates.slice(0, 30).map((line, index) => ({
-    title: `任务 ${index + 1}`,
-    prompt: line,
-    aspectRatio: /横|banner|16:9|21:9/i.test(line) ? '16:9' : (/竖|海报|9:16|3:4/i.test(line) ? '3:4' : '1:1'),
-    imageSize: '1K',
-    imageUrls: extractImageUrlsFromText(line),
-    id: `item-${index + 1}`,
-    status: 'draft'
-  }));
-};
-
-const bytesToDataUrl = async (bytes: Uint8Array, mime: string) => new Promise<string>((resolve, reject) => {
-  const reader = new FileReader();
-  reader.onloadend = () => resolve(String(reader.result || ''));
-  reader.onerror = () => reject(reader.error || new Error('Image read failed'));
-  reader.readAsDataURL(new Blob([bytes], { type: mime }));
-});
-
-const detectDispimgRefs = (text: string) => (
-  Array.from(text.matchAll(/DISPIMG\s*\(\s*["']?([^"',)]+)["']?/gi)).map((match) => match[1])
-);
-
-const inferImageMime = (path: string) => {
-  const ext = path.split('.').pop()?.toLowerCase() || '';
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
-  if (ext === 'webp') return 'image/webp';
-  if (ext === 'gif') return 'image/gif';
-  if (ext === 'bmp') return 'image/bmp';
-  if (ext === 'svg') return 'image/svg+xml';
-  return 'image/png';
-};
-
-const getWorkbookEntryBytes = (entry: any): Uint8Array | null => {
-  const content = entry?.content ?? entry?.data ?? entry;
-  if (!content) return null;
-  if (content instanceof Uint8Array) return content;
-  if (content instanceof ArrayBuffer) return new Uint8Array(content);
-  if (ArrayBuffer.isView(content)) return new Uint8Array(content.buffer, content.byteOffset, content.byteLength);
-  if (Array.isArray(content)) return Uint8Array.from(content);
-  if (typeof content === 'string') {
-    const binary = content.startsWith('data:')
-      ? atob(content.split(',', 2)[1] || '')
-      : content;
-    return Uint8Array.from(binary, (char) => char.charCodeAt(0) & 0xff);
-  }
-  return null;
-};
-
-const extractWorkbookImages = async (files: Record<string, any> | undefined, limit = 24) => {
-  if (!files) return [];
-  const mediaPaths = Object.keys(files)
-    .filter((path) => /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(path.replace(/^\/+/, '')))
-    .slice(0, limit);
-
-  const images: string[] = [];
-  for (const path of mediaPaths) {
-    const bytes = getWorkbookEntryBytes(files[path]);
-    if (!bytes) continue;
-    try {
-      const name = path.split('/').pop() || `embedded-${images.length + 1}.png`;
-      const mime = inferImageMime(path);
-      const file = new File([bytes], name, { type: mime });
-      images.push(await fileToOptimizedImageDataUrl(file, { maxEdge: 1200, quality: 0.82 }));
-    } catch {
-      try {
-        images.push(await bytesToDataUrl(bytes, inferImageMime(path)));
-      } catch {
-        // Ignore unreadable embedded images; text parsing should still work.
-      }
-    }
-  }
-  return images;
-};
-
-const readRequirementFile = async (file: File): Promise<RequirementReadResult> => {
-  const name = file.name.toLowerCase();
-  if (name.endsWith('.docx') || name.endsWith('.doc') || name.endsWith('.pdf')) {
-    const service = new AIService();
-    return service.parseRequirementDocument(file);
-  }
-
-  if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
-    const buffer = await file.arrayBuffer();
-    const workbook = XLSX.read(buffer, { type: 'array', bookFiles: true });
-    const embeddedImages = await extractWorkbookImages((workbook as any).files);
-    const sections = workbook.SheetNames.slice(0, 6).map((sheetName) => {
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: '' }).slice(0, 160);
-      const textRows = rows
-        .map((row) => row.map((cell) => String(cell ?? '').trim()).join('\t').trim())
-        .filter(Boolean);
-      return [`# 工作表：${sheetName}`, ...textRows].join('\n');
-    });
-    const text = sections.join('\n\n');
-    const dispimgRefs = detectDispimgRefs(text);
-    const warnings: string[] = [];
-    if (dispimgRefs.length > 0 && embeddedImages.length === 0) {
-      warnings.push(
-        `检测到 ${dispimgRefs.length} 个 DISPIMG 图片占位符，但没有从表格里提取到真实图片。` +
-        `这些 ID 不是图片内容，模型无法看图；请把文件另存为 .xlsx 后重传，或直接把产品图/证书图/场景图作为“参考图”上传。`
-      );
-    } else if (dispimgRefs.length > embeddedImages.length) {
-      warnings.push(
-        `检测到 ${dispimgRefs.length} 个 DISPIMG 图片占位符，但只提取到 ${embeddedImages.length} 张真实图片；仍可能有部分任务缺图。`
-      );
-    }
-    return { text, images: embeddedImages, warnings };
-  }
-
-  return { text: await file.text(), images: [] };
-};
-
-const buildAgentSystemPrompt = () => [
-  '你是嵌入在 AI Canvas 里的画布智能体，不是普通客服。',
-  '你的首要职责是理解用户意图和当前画布状态，然后返回可执行的画布 actions；前端会真正执行这些 actions。',
-  '你必须友好、简洁、直接。用户说中文时用中文。',
-  '重点规则：',
-  '- 默认优先使用 actions 操作当前画布，不要先把用户带进复杂任务草稿流程。',
-  '- 小动作直接返回 actions：修改选中节点、改提示词、改比例/分辨率/质量、创建单个节点、连接明确节点、运行选中节点。',
-  '- nodeId 可以使用 "selected" 表示当前选中节点；如果没有选中节点且无法判断目标，先追问。',
-  '- create_node 的 nodeType 必须使用 INPUT、IMAGE_UPLOAD、MULTI_IMAGE_UPLOAD、AI_CHAT、AI_IMAGE、AI_AUDIO、AI_VIDEO、OUTPUT、GROUP 等枚举值。',
-  '- update_node_config 的 config 只写需要修改的字段，例如 prompt、aspectRatio、imageSize、imageQuality、modelId。',
-  '- 需要批量创建很多节点、批量运行或可能覆盖多个节点时，把 needsConfirmation 设为 true；用户明确说“直接/帮我/开始/跑”时可以设为 false。',
-  '- 不要在文字里假装已经操作；如果要操作，必须返回 actions。',
-  '- 如果只是询问画布情况，可以返回 explain_canvas 或只给 reply，不需要 tasks。',
-  '- 只有用户明确要“拆任务/批量任务草稿/一图一任务计划”时，才生成或更新 tasks。',
-  '- 每个 task 对应一张真实要生成的图。',
-  '- task.prompt 必须是干净、完整、自包含、可直接给图像模型使用的中文提示词。',
-  '- 如果用户提供了产品图、参考图或图片链接，必须把对应图片放进 task.imageUrls；如果整批共享同一组产品图，可以让每个 task.imageUrls 为空，由系统使用整批参考图。',
-  '- 如果材料里只有 DISPIMG、图片 ID、文件名、图片编号，但 image 输入里没有真实图片，你必须明确告知用户补充真实图片，不要根据 ID 猜测锅具、证书、场景或主体外观。',
-  '- 如果用户要求“一图一任务/按上传顺序对应/每个链接对应一张”，必须按顺序把每个图片链接放到对应 task.imageUrls。',
-  '- 不要写“同上”，不要继承旧提示词，不要依赖隐藏上下文。',
-  '- 如果用户要求修改某几条任务，只更新相关任务，保留其它任务。',
-  '- 用户明确说“展开到画布”“帮我跑”“直接生成”时，用 tool_calls 表达动作意图，但不要在回复里假装已经执行。',
-  '- 如果只是更新任务草案，使用 update_tasks；如果要创建画布节点，使用 expand_canvas；如果要批量执行，使用 run_batch；如果用户要重试失败项，使用 retry_failed。',
-  '- validation 里必须给出你对任务草案的自检结果：是否通过、错误、提醒。错误用于阻止执行，提醒用于提示用户。',
-  '你只能返回严格 JSON，不要 Markdown，不要代码块。',
-  '优先 JSON 格式：',
-  '{"reply":"给用户看的简短回复","actions":[{"type":"update_node_config|create_node|connect_nodes|run_node|run_selected|run_all_image_nodes|explain_canvas","nodeId":"selected","nodeType":"AI_IMAGE","config":{"prompt":"","aspectRatio":"46:19","imageSize":"2K","imageQuality":"medium"},"sourceId":"","targetId":"","requiresConfirmation":false,"reason":""}],"needsConfirmation":false}',
-  '兼容任务 JSON 格式：',
-  '{"reply":"给用户看的自然语言回复","summary":"当前计划摘要","plan":[{"step_id":1,"description":"","tool":"update_tasks|expand_canvas|run_batch|retry_failed|null","validation":""}],"tasks":[{"title":"","prompt":"","aspectRatio":"1:1","imageSize":"1K","imageUrls":[]}],"tool_calls":[{"tool":"update_tasks|expand_canvas|run_batch|retry_failed","parameters":{},"requires_confirmation":true,"reason":""}],"validation":{"passed":true,"errors":[],"warnings":[]}}',
-  '如果只是聊天或追问，tasks 可以省略或返回当前 tasks。'
-].join('\n');
-
-const buildAgentUserPayload = (params: {
-  userMessage: string;
-  requirementText: string;
-  referenceImageCount: number;
-  documentAssets: DocumentAsset[];
-  tasks: AgentTask[];
-  messages: AgentMessage[];
-  canvasSummary: { nodeCount: number; edgeCount: number; nodeTypes: Record<string, number>; selectedChatModel: string; selectedImageModel: string };
-  canvasState: any;
-}) => JSON.stringify({
-  userMessage: params.userMessage,
-  requirementText: clampText(params.requirementText),
-  referenceImageCount: params.referenceImageCount,
-  imageManifest: params.referenceImageCount > 0
-    ? {
-      instruction: '本次请求已随 image 输入附带图片，图片顺序与这里的序号一致。分析产品/参考图时必须结合视觉内容，不要只根据文件名或 DISPIMG 文本猜测。',
-      totalImages: params.referenceImageCount,
-      documents: params.documentAssets.map((asset) => ({
-        fileName: asset.fileName,
-        imageIndexes: asset.images.map((image) => image.index),
-        imageCount: asset.images.length
-      }))
-    }
-    : {
-      instruction: '本次请求没有附带可视觉识别的图片。如果需求文本里出现 DISPIMG、图片 ID、图片文件名或“见图”，应明确提示用户重新上传包含图片的原始文件或图片素材，不要猜测图片内容。',
-      totalImages: 0,
-      documents: []
-    },
-  currentTasks: params.tasks,
-  recentConversation: params.messages.slice(-10).map((message) => ({
-    role: message.role,
-    content: message.content
-  })),
-  canvasSummary: params.canvasSummary,
-  canvasState: params.canvasState,
-  availableCanvasActions: [
-    'update_node_config',
-    'create_node',
-    'connect_nodes',
-    'run_node',
-    'run_selected',
-    'run_all_image_nodes',
-    'explain_canvas'
-  ]
-}, null, 2);
-
-const wantsRun = (text: string) => /帮我.*(跑|生成|执行)|直接.*(跑|生成|执行)|开始.*(跑|生成|执行)|批量跑|跑图|生成图片/.test(text);
-const wantsExpand = (text: string) => /展开|放到画布|生成节点|创建节点|搭.*工作流/.test(text);
-const confirmsPendingAction = (text: string) => /^(好|好的|可以|确认|执行|继续|开始|是|对|ok|OK|yes|Yes)$/i.test(text.trim());
-const CANVAS_ACTION_TYPES = new Set<CanvasAgentActionType>([
-  'update_node_config',
-  'create_node',
-  'connect_nodes',
-  'run_node',
-  'run_selected',
-  'run_all_image_nodes',
-  'explain_canvas'
-]);
-
-const normalizeCanvasActions = (parsed: any): CanvasAgentAction[] => {
-  const rawActions = Array.isArray(parsed?.actions)
-    ? parsed.actions
-    : (parsed?.action && typeof parsed.action === 'object' ? [parsed.action] : []);
-
-  return rawActions
-    .map((action: any): CanvasAgentAction | null => {
-      const type = String(action?.type || '').trim() as CanvasAgentActionType;
-      if (!CANVAS_ACTION_TYPES.has(type)) return null;
-      return {
-        type,
-        nodeId: action?.nodeId ? String(action.nodeId) : undefined,
-        nodeType: action?.nodeType ? String(action.nodeType) : undefined,
-        sourceId: action?.sourceId ? String(action.sourceId) : undefined,
-        targetId: action?.targetId ? String(action.targetId) : undefined,
-        connectFromId: action?.connectFromId ? String(action.connectFromId) : undefined,
-        config: action?.config && typeof action.config === 'object' ? action.config : undefined,
-        prompt: typeof action?.prompt === 'string' ? action.prompt : undefined,
-        label: typeof action?.label === 'string' ? action.label : undefined,
-        position: action?.position && typeof action.position === 'object' ? action.position : undefined,
-        requiresConfirmation: action?.requiresConfirmation === true || action?.requires_confirmation === true,
-        reason: typeof action?.reason === 'string' ? action.reason : undefined,
-      };
-    })
-    .filter((action): action is CanvasAgentAction => !!action);
-};
+const confirmsPendingAction = (text: string) => /^(好|好的|可以|确认|执行|继续|开始|是|对|ok|yes)$/i.test(text.trim());
+const wantsRun = (text: string) => /(运行|执行|跑|生成|开始|run)/i.test(text);
+const wantsMany = (text: string) => /(全部|所有|批量|每个|一批|多个)/i.test(text);
 
 const resolveCanvasNodeType = (value?: string): NodeType | null => {
   const raw = String(value || '').trim();
@@ -630,57 +497,338 @@ const resolveCanvasNodeType = (value?: string): NodeType | null => {
     UPLOAD: NodeType.IMAGE_UPLOAD,
     IMAGE_REFERENCE: NodeType.IMAGE_UPLOAD,
     MULTI_UPLOAD: NodeType.MULTI_IMAGE_UPLOAD,
+    FILE: NodeType.FILE_UPLOAD,
+    FILE_UPLOAD: NodeType.FILE_UPLOAD,
+    DOCUMENT: NodeType.FILE_UPLOAD,
+    EXCEL: NodeType.FILE_UPLOAD,
+    SPREADSHEET: NodeType.FILE_UPLOAD,
+    TABLE: NodeType.TABLE_PARSE,
+    TABLE_PARSE: NodeType.TABLE_PARSE,
+    PARSE_TABLE: NodeType.TABLE_PARSE,
+    SPREADSHEET_PARSE: NodeType.TABLE_PARSE,
+    TASK: NodeType.TASK_SELECT,
+    TASK_SELECT: NodeType.TASK_SELECT,
+    SELECT_TASK: NodeType.TASK_SELECT,
+    BATCH: NodeType.BATCH_EXECUTE,
+    BATCH_EXECUTE: NodeType.BATCH_EXECUTE,
+    BATCH_RUN: NodeType.BATCH_EXECUTE,
+    STYLE: NodeType.STYLE_GUIDE,
+    STYLE_GUIDE: NodeType.STYLE_GUIDE,
+    PRODUCT_MATCH: NodeType.PRODUCT_IMAGE_MATCH,
+    PRODUCT_IMAGE_MATCH: NodeType.PRODUCT_IMAGE_MATCH,
+    IMAGE_MATCH: NodeType.PRODUCT_IMAGE_MATCH,
   };
   if (aliases[normalized]) return aliases[normalized];
-  const matched = Object.values(NodeType).find((type) => type === normalized);
-  return matched || null;
+  return Object.values(NodeType).find((type) => type === normalized) || null;
 };
 
-const defaultWelcomeMessage: AgentMessage = {
-  id: 'welcome',
-  role: 'assistant',
-  content: '直接告诉我你想怎么改画布。我会先理解当前节点和连线，再用可执行动作帮你改节点、连线或运行。需要批量拆任务时再进入任务草稿。'
+const normalizeStringArray = (value: any): string[] | undefined => {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => String(item || '').trim()).filter(Boolean);
+    return items.length > 0 ? items : undefined;
+  }
+  if (typeof value === 'string') {
+    const items = value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+    return items.length > 0 ? items : undefined;
+  }
+  return undefined;
+};
+
+const normalizeCanvasActions = (parsed: any): CanvasAgentAction[] => {
+  const rawActions = Array.isArray(parsed?.actions)
+    ? parsed.actions
+    : (parsed?.action && typeof parsed.action === 'object' ? [parsed.action] : []);
+
+  return rawActions
+    .map((action: any): CanvasAgentAction | null => {
+      const type = String(action?.type || '').trim() as CanvasAgentActionType;
+      if (!ACTION_TYPES.has(type)) return null;
+      return {
+        type,
+        nodeId: action?.nodeId ? String(action.nodeId) : undefined,
+        nodeType: action?.nodeType ? String(action.nodeType) : undefined,
+        sourceId: action?.sourceId ? String(action.sourceId) : undefined,
+        sourceHandle: action?.sourceHandle ? String(action.sourceHandle) : undefined,
+        targetId: action?.targetId ? String(action.targetId) : undefined,
+        targetHandle: action?.targetHandle ? String(action.targetHandle) : undefined,
+        connectFromId: action?.connectFromId ? String(action.connectFromId) : undefined,
+        attachmentId: action?.attachmentId ? String(action.attachmentId) : undefined,
+        attachmentIds: normalizeStringArray(action?.attachmentIds),
+        spreadsheetImageIds: normalizeStringArray(action?.spreadsheetImageIds || action?.imageIds || action?.spreadsheetImages),
+        maxImages: Number.isFinite(Number(action?.maxImages)) ? Number(action.maxImages) : undefined,
+        config: action?.config && typeof action.config === 'object' ? action.config : undefined,
+        prompt: typeof action?.prompt === 'string' ? action.prompt : undefined,
+        label: typeof action?.label === 'string' ? action.label : undefined,
+        position: action?.position && typeof action.position === 'object' ? action.position : undefined,
+        requiresConfirmation: action?.requiresConfirmation === true || action?.requires_confirmation === true,
+        reason: typeof action?.reason === 'string' ? action.reason : undefined,
+      };
+    })
+    .filter((action): action is CanvasAgentAction => !!action);
+};
+
+const summarizeAction = (action: CanvasAgentAction) => {
+  if (action.type === 'update_node_config') return `修改 ${action.nodeId || 'selected'}`;
+  if (action.type === 'create_node') return `创建 ${action.nodeType || '节点'}`;
+  if (action.type === 'parse_spreadsheet_attachment') return `解析表格 ${action.attachmentId || ''}`;
+  if (action.type === 'extract_spreadsheet_images') return `提取表格图片 ${action.attachmentId || ''}`;
+  if (action.type === 'attach_file_to_canvas') {
+    const selectedImages = action.spreadsheetImageIds?.length ? `，${action.spreadsheetImageIds.length} 张表内图` : '';
+    return `上传 ${action.attachmentId || action.attachmentIds?.length || '附件'} 到画布${selectedImages}`;
+  }
+  if (action.type === 'connect_nodes') return `连接 ${action.sourceId || '?'} -> ${action.targetId || '?'}`;
+  if (action.type === 'run_selected') return '运行选中节点';
+  if (action.type === 'run_node') return `运行 ${action.nodeId || '节点'}`;
+  if (action.type === 'run_all_image_nodes') return '运行全部图像节点';
+  return '读取画布说明';
+};
+
+const buildAgentSystemPrompt = () => [
+  '# Canvas Agent Skill v1',
+  '',
+  '你是 AI Canvas 的画布操作智能体。你的职责不是聊天陪跑，而是把用户的自然语言意图转成安全、可验证、可执行的画布 actions。',
+  '你像 Claude Code 一样工作：你负责判断、规划、选择工具；前端负责真正执行画布工具，并把 toolResults 回传给你。',
+  '',
+  '## 0. 不可违反的工作边界',
+  '- 只操作画布能力：查看画布状态、解释结构、分析附件、创建节点、修改节点、连接节点、运行节点。',
+  '- 不要假装已经执行工具。凡是会改变画布或运行节点的事，都必须通过 actions。',
+  '- 不要做批次管理、历史保存、真实文件上传；附件已经由前端读取，你只能分析 availableAttachments 或把附件节点化。',
+  '- 不确定就追问。不要为了显得主动而替用户最终选择任务、图片、行号、节点或批量范围。',
+  '- 每个会改变画布的 action 都必须有 reason。reason 说明为什么这一步必要。',
+  '',
+  '## 1. Karpathy 行为规范',
+  '- Think Before Acting：先判断用户是“分析/解释/筛选/计划”还是“执行/导入/搭建/运行”。没有明确执行意图时 actions 必须为空。',
+  '- Simplicity First：用最少节点完成目标。不要为了炫技创建多余节点、分组、复杂链路。',
+  '- Surgical Changes：只修改用户指定或目标必需的节点。不要顺手重写其他节点 prompt、模型或连线。',
+  '- Goal-Driven Execution：每次动作要有可验证结果；工具失败后先解释失败与下一步，不要继续叠加错误动作。',
+  '',
+  '## 2. 输出协议',
+  '- 只能返回严格 JSON。不要 Markdown，不要代码块，不要额外解释。',
+  '- 顶层字段：reply, actions, needsConfirmation, reason。',
+  '- reply 用简短中文，说明你理解了什么、做了什么或需要用户确认什么。',
+  '- actions 是数组。没有动作时返回空数组。',
+  '- needsConfirmation=true 用于整组动作需要用户确认；单个 action 也可以 requiresConfirmation=true。',
+  '- nodeId 可以用 "selected" 表示当前选中节点。',
+  '- sourceId/targetId 必须来自 canvasState.nodes，除非 sourceId 使用 "last_created" 引用本轮刚创建的最后一个节点。',
+  '- create_node 支持 connectFromId/sourceId；如果需要精确连线，可以提供 sourceHandle 和 targetHandle。',
+  '- attach_file_to_canvas 支持 attachmentId/attachmentIds；导入 Excel 表内图片子集时提供 spreadsheetImageIds（也可写 imageIds）。',
+  '',
+  'JSON 示例：',
+  '{"reply":"我会先解析表格，整理候选任务后再让你确认是否导入。","actions":[{"type":"parse_spreadsheet_attachment","attachmentId":"attachment_x","reason":"用户要求读取表格任务，解析不会修改画布。"}],"needsConfirmation":false,"reason":""}',
+  '',
+  '## 3. 可用 actions',
+  '- explain_canvas：解释当前画布结构，不修改画布。',
+  '- parse_spreadsheet_attachment：解析 xlsx/xls/csv 附件，返回 sheet、列角色、任务行估算和样例任务。不修改画布。',
+  '- extract_spreadsheet_images：提取 Excel 表内嵌图片，返回图片 id、sheet、行列位置。不修改画布。',
+  '- attach_file_to_canvas：把已选附件放进画布，创建 IMAGE_UPLOAD、MULTI_IMAGE_UPLOAD 或 FILE_UPLOAD 节点。只在用户明确要求导入/放到画布/连接到节点时使用；若只导入 Excel 表内某几张图片，提供 spreadsheetImageIds。',
+  '- create_node：创建节点。nodeType 支持 INPUT、IMAGE_UPLOAD、MULTI_IMAGE_UPLOAD、FILE_UPLOAD、TABLE_PARSE、TASK_SELECT、BATCH_EXECUTE、STYLE_GUIDE、PRODUCT_IMAGE_MATCH、AI_CHAT、AI_IMAGE、AI_AUDIO、AI_VIDEO、OUTPUT、GROUP。',
+  '- update_node_config：修改节点 label/config/prompt。常用 config：prompt、systemInstruction、modelId、aspectRatio、imageSize、imageQuality、duration、parseMode、sheetName、dataStartRow、requirementColumn、textColumns、taskIndex、startIndex、endIndex、styleName、tone、palette、lighting、background、composition、camera、material、qualityKeywords、consistencyRules、negativeRules、maxSelections、matchNotes。',
+  '- connect_nodes：连接节点。可选 sourceHandle/targetHandle；没有提供时系统会推断常用 handle。',
+  '- run_selected：运行当前选中节点，并自动先运行必要上游。',
+  '- run_node：运行指定节点，并自动先运行必要上游。',
+  '- run_all_image_nodes：运行全部 AI_IMAGE 节点。高风险，必须非常明确或确认。',
+  '',
+  '## 4. 节点能力地图',
+  '- INPUT：输出文本 prompt。常接 AI_CHAT/AI_IMAGE/AI_AUDIO/AI_VIDEO 的 prompt。',
+  '- FILE_UPLOAD：输出文件。Excel/CSV 接 TABLE_PARSE.file。',
+  '- IMAGE_UPLOAD / MULTI_IMAGE_UPLOAD：输出一张/多张图片。常接 AI_IMAGE.image、AI_CHAT.image、STYLE_GUIDE.image、PRODUCT_IMAGE_MATCH.image。',
+  '- TABLE_PARSE：把表格文件解析为任务列表。输入 file，输出 tasks。',
+  '- TASK_SELECT：从任务列表中选第 N 条。输入 tasks，输出 prompt、image、task。',
+  '- BATCH_EXECUTE：从任务列表展开批量生成。输入 tasks；第一次运行展开，第二次运行批量生成。',
+  '- STYLE_GUIDE：根据任务/参考图生成统一风格约束。输入 task/image，输出 prompt/style。',
+  '- PRODUCT_IMAGE_MATCH：根据任务和候选产品图筛选最匹配参考图。输入 task/prompt/image，输出 image/report。',
+  '- AI_CHAT：文本/多模态推理。输入 prompt/image/style，输出文本。',
+  '- AI_IMAGE：图像生成。输入 prompt/image/template/batch，输出图片。',
+  '- AI_AUDIO：语音生成。输入 prompt，输出音频。',
+  '- AI_VIDEO：视频生成。输入 prompt/image，输出视频。',
+  '- OUTPUT：汇总展示上游输出。',
+  '- GROUP：视觉分组，不参与数据流。',
+  '',
+  '## 5. 常用 handle',
+  '- 文件到表格：FILE_UPLOAD.output -> TABLE_PARSE.file',
+  '- 表格到任务选择：TABLE_PARSE.output -> TASK_SELECT.tasks',
+  '- 表格到批量：TABLE_PARSE.output -> BATCH_EXECUTE.tasks',
+  '- 任务到图像：TASK_SELECT.prompt -> AI_IMAGE.prompt；TASK_SELECT.image -> AI_IMAGE.image；TASK_SELECT.task -> STYLE_GUIDE.task 或 PRODUCT_IMAGE_MATCH.task',
+  '- 风格到图像：STYLE_GUIDE.prompt -> AI_IMAGE.prompt',
+  '- 产品图筛选到图像：PRODUCT_IMAGE_MATCH.image -> AI_IMAGE.image',
+  '- 上传图到图像：IMAGE_UPLOAD.output / MULTI_IMAGE_UPLOAD.output -> AI_IMAGE.image',
+  '- 已生成图片到视频：AI_IMAGE -> AI_VIDEO.image（生成类节点的 sourceHandle 留空）。',
+  '- 批量节点可以直接运行并自动补默认图像模板；只有用户要求高级模板时才额外创建 STYLE_GUIDE/PRODUCT_IMAGE_MATCH/AI_IMAGE 模板链。',
+  '',
+  '## 6. 意图路由',
+  '- 解释/看看画布/当前结构：使用 explain_canvas，或直接根据 canvasState 回复；不创建节点。',
+  '- 读取/识别/分析/整理/总结附件：优先分析附件，不导入画布。',
+  '- 分析表格/Excel/CSV/表格任务：如果有 xlsx 附件，先 parse_spreadsheet_attachment；返回候选任务、sheet、行号、缺失信息。',
+  '- 查看/提取表格图片/内嵌图/参考图：先 extract_spreadsheet_images；列出图片 id 和行列，等待用户选择或确认导入。',
+  '- 导入附件/放到画布/连接到选中节点：使用 attach_file_to_canvas；有多个附件时必须明确 attachmentIds 或先追问。',
+  '- 修改当前节点：如果 selectedNodeId 存在，使用 update_node_config；没有选中且用户没给节点 id，先追问。',
+  '- 创建单个生图节点：create_node AI_IMAGE，可设置 prompt/aspectRatio/imageSize/imageQuality/modelId；需要参考图时先导入或连接图片节点。',
+  '- 搭建表格批量生图：典型流程是 attach_file_to_canvas -> create_node TABLE_PARSE -> connect -> create_node BATCH_EXECUTE -> connect。运行前通常 needsConfirmation=true。',
+  '- 搭建单条任务生图：FILE_UPLOAD -> TABLE_PARSE -> TASK_SELECT -> AI_IMAGE；如需统一风格，加 STYLE_GUIDE；如需产品图筛选，加 PRODUCT_IMAGE_MATCH。',
+  '- 运行/生成/开始：只运行用户指定节点、选中节点、明确范围或刚创建的必要节点；批量运行必须确认。',
+  '',
+  '## 7. 附件与候选选择纪律',
+  '- 附件默认只是智能体上下文。用户说“读取/分析/看看文档/看看图片/提取需求”时，只回复整理结果或使用非修改类解析 action。',
+  '- 用户说品类、系列、关键词、sheet 名、模糊范围，例如“钛锅”“做这个系列”“看看主图”“这个表里的”，只表示缩小候选，不表示执行。',
+  '- 多个候选任务/图片/附件时，必须列出最相关候选：编号、sheet、行号、简短内容、图片 id，然后追问“选哪条/哪几条/是否全部”。',
+  '- 只有用户明确说“第 3 行导入”“做第 1 条”“这些全部导入”“按刚才选的执行”“连接到选中节点”时，才能导入或修改画布。',
+  '- 如果用户要求把表格图片导入画布，先 extract_spreadsheet_images；用户选择图片 id 后，用 attach_file_to_canvas + spreadsheetImageIds 精确导入，不要默认把整份表所有图片都导入。',
+  '',
+  '## 8. 安全确认规则',
+  '- 以下必须 needsConfirmation=true：创建超过 3 个节点、批量范围超过 5 条、run_all_image_nodes、会运行多个节点、用户意图模糊但动作会修改画布、将附件全部导入、影响多个已有节点。',
+  '- 用户只是要求“分析/整理/看看/识别/提取信息”时，不要设置修改画布的 actions。',
+  '- 用户要求 46:19 且模型是 gpt-image-2 时，imageSize 只能用 2K 或 4K；如果用户要 1K，自动改 2K 并在 reply 说明。',
+  '- 不删除、不清空、不重排整张画布；当前没有删除 action，不要编造。',
+  '',
+  '## 9. 画布搭建模板',
+  '- 简单文生图：create INPUT 或直接 create AI_IMAGE(config.prompt)，必要时 run_node。只为一个 prompt 创建一个 AI_IMAGE。',
+  '- 参考图生图：attach_file_to_canvas 图片 -> create AI_IMAGE -> connect image -> 设置 prompt -> 运行或等待确认。',
+  '- 单条表格任务：attach_file_to_canvas 表格 -> TABLE_PARSE -> TASK_SELECT(config.taskIndex) -> AI_IMAGE。先运行 TABLE_PARSE/TASK_SELECT，再运行 AI_IMAGE。',
+  '- 批量表格生图：attach_file_to_canvas 表格 -> TABLE_PARSE -> BATCH_EXECUTE(config.startIndex/endIndex)。先确认范围；第一次运行 BATCH_EXECUTE 展开，第二次运行开始批量。',
+  '- 品牌统一风格：TASK_SELECT.task + 参考图 -> STYLE_GUIDE -> AI_IMAGE.prompt；STYLE_GUIDE 只放风格约束，不改产品主体真实性。',
+  '- 产品图智能匹配：TASK_SELECT.task/prompt + MULTI_IMAGE_UPLOAD.image -> PRODUCT_IMAGE_MATCH -> AI_IMAGE.image。',
+  '- 视频：已有图片或生成图 -> AI_VIDEO.image，加 prompt 描述运动；没有图片时只用 prompt 生成视频。',
+  '',
+  '## 10. 工具循环',
+  '- 第 1 步通常用于分析/创建/连接/运行一个小闭环。',
+  '- 收到 toolResults 后，根据结果继续：成功则汇报或下一步；失败则停止追问或给出修复动作。',
+  '- 不要重复执行已经成功的同一 action，除非用户要求重跑。',
+  '- 最多 4 轮，优先在 1-2 轮内完成。',
+].join('\n');
+
+const buildAgentPayload = (params: {
+  userMessage: string;
+  messages: AgentMessage[];
+  canvasState: any;
+  attachments: AgentAttachment[];
+  toolResults: CanvasToolResult[];
+  step: number;
+}) => JSON.stringify({
+  userMessage: params.userMessage,
+  step: params.step,
+  recentConversation: params.messages.slice(-10).map((message) => ({
+    role: message.role,
+    content: message.content,
+  })),
+  canvasState: params.canvasState,
+  availableAttachments: params.attachments.map((attachment) => ({
+    id: attachment.id,
+    name: attachment.name,
+    kind: attachment.kind,
+    size: attachment.size,
+    mime: attachment.mime,
+    summary: attachment.modelSummary,
+    spreadsheet: attachment.spreadsheet ? {
+      sheetCount: attachment.spreadsheet.sheetCount,
+      taskLikeRowCount: attachment.spreadsheet.taskLikeRowCount,
+      embeddedImageCount: attachment.spreadsheet.embeddedImageCount,
+      extractedImageCount: attachment.spreadsheetImages?.length || 0,
+      extractedImages: (attachment.spreadsheetImages || []).slice(0, 20).map((image) => ({
+        id: image.id,
+        sheetName: image.sheetName,
+        rowNumber: image.rowNumber,
+        columnNumber: image.columnNumber,
+        mime: image.mime,
+      })),
+      sheets: attachment.spreadsheet.sheets.map((sheet) => ({
+        name: sheet.name,
+        rowCount: sheet.rowCount,
+        columnCount: sheet.columnCount,
+        headers: sheet.headers,
+        detectedColumns: sheet.detectedColumns,
+      })),
+    } : undefined,
+  })),
+  availableActions: Array.from(ACTION_TYPES),
+  toolResults: params.toolResults,
+}, null, 2);
+
+const renderMessage = (content: string) => (
+  <div className="space-y-1.5">
+    {content.split('\n').map((line, index) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return <div key={`${index}-empty`} className="h-1.5" />;
+      }
+      if (/^[-•]\s+/.test(trimmed)) {
+        return (
+          <div key={`${index}-${trimmed.slice(0, 12)}`} className="flex gap-1.5 text-[11px] leading-relaxed text-gray-300">
+            <ChevronRight size={12} className="mt-0.5 shrink-0 text-cyan-300/70" />
+            <span className="min-w-0 break-words">{trimmed.replace(/^[-•]\s+/, '')}</span>
+          </div>
+        );
+      }
+      return (
+        <p key={`${index}-${trimmed.slice(0, 12)}`} className="break-words text-[11px] leading-relaxed text-gray-300">
+          {trimmed}
+        </p>
+      );
+    })}
+  </div>
+);
+
+const getAttachmentKindLabel = (kind: AgentAttachment['kind']) => {
+  if (kind === 'image') return '图片';
+  if (kind === 'video') return '视频';
+  if (kind === 'xlsx') return '表格';
+  return '文件';
+};
+
+const summarizeToolResultsForUser = (results: CanvasToolResult[]) => {
+  if (results.length === 0) return '没有可执行的画布动作。';
+  return results.map((result) => {
+    const raw = String(result.message || '');
+    if (result.tool === 'parse_spreadsheet_attachment' && raw.startsWith('表格解析结果：')) {
+      try {
+        const parsed = JSON.parse(raw.replace(/^表格解析结果：\s*/, ''));
+        const sheets = Array.isArray(parsed?.sheets) ? parsed.sheets : [];
+        const sheetLines = sheets.slice(0, 4).map((sheet: any) => {
+          const columns = Array.isArray(sheet?.detectedColumns)
+            ? sheet.detectedColumns.map((column: any) => `${column.header || `列${Number(column.index || 0) + 1}`}=${column.role}`).join('、')
+            : '未识别关键列';
+          return `- ${sheet?.name || '工作表'}：${sheet?.rowCount || 0} 行，${sheet?.columnCount || 0} 列；${columns || '未识别关键列'}`;
+        });
+        return [
+          `已解析表格「${parsed?.fileName || '附件'}」。`,
+          `工作表 ${parsed?.sheetCount || sheets.length || 0} 个，估算任务行 ${parsed?.taskLikeRowCount || 0} 条，表内图片 ${parsed?.embeddedImageCount || 0} 张。`,
+          ...sheetLines,
+          '我会基于这些解析结果继续整理需求。',
+        ].join('\n');
+      } catch {
+        return '已解析表格，我会基于解析结果继续整理需求。';
+      }
+    }
+    if (result.tool === 'extract_spreadsheet_images' && raw.startsWith('表格图片提取结果：')) {
+      try {
+        const parsed = JSON.parse(raw.replace(/^表格图片提取结果：\s*/, ''));
+        const images = Array.isArray(parsed?.images) ? parsed.images : [];
+        const imageLines = images.slice(0, 8).map((image: any) => (
+          `- ${image.id}：${image.sheetName} 第 ${image.rowNumber} 行，第 ${image.columnNumber} 列`
+        ));
+        return [
+          `已从「${parsed?.fileName || '表格'}」提取图片。`,
+          `共 ${parsed?.totalImages || 0} 张，本次返回 ${parsed?.returnedImages || images.length || 0} 张。`,
+          ...imageLines,
+          images.length > 8 ? `- 还有 ${images.length - 8} 张未展示。` : '',
+          '这些图片现在可以作为参考图导入画布节点。',
+        ].filter(Boolean).join('\n');
+      } catch {
+        return '已提取表格图片，可以继续导入画布。';
+      }
+    }
+    return raw.length > 600 ? `${raw.slice(0, 600)}...` : raw;
+  }).join('\n');
+};
+
+const actionIcon = (type: CanvasAgentActionType) => {
+  if (type === 'update_node_config') return Settings2;
+  if (type === 'create_node') return Plus;
+  if (type === 'connect_nodes') return Link2;
+  if (type === 'run_node' || type === 'run_selected' || type === 'run_all_image_nodes') return Play;
+  return Sparkles;
 };
 
 export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isOpen, onClose }) => {
-  const reactFlow = useReactFlow();
-  const requirementFileRef = useRef<HTMLInputElement>(null);
-  const imageFileRef = useRef<HTMLInputElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const initialDraft = useMemo(() => readPersistedDraft(), []);
-  const [requirementText, setRequirementText] = useState(initialDraft?.requirementText || '');
-  const [chatInput, setChatInput] = useState('');
-  const [tasks, setTasks] = useState<AgentTask[]>(initialDraft?.tasks || []);
-  const [summary, setSummary] = useState(initialDraft?.summary || '');
-  const [messages, setMessages] = useState<AgentMessage[]>(
-    initialDraft?.messages?.length ? initialDraft.messages : [defaultWelcomeMessage]
-  );
-  const [referenceImages, setReferenceImages] = useState<string[]>(initialDraft?.referenceImages || []);
-  const [documentAssets, setDocumentAssets] = useState<DocumentAsset[]>(initialDraft?.documentAssets || []);
-  const [storedReferenceImageCount, setStoredReferenceImageCount] = useState(initialDraft?.storedReferenceImageCount || initialDraft?.referenceImages?.length || 0);
-  const [createdWorkflow, setCreatedWorkflow] = useState<CreatedWorkflow | null>(null);
-  const [batchId, setBatchId] = useState<string | null>(initialDraft?.batchId || null);
-  const [batchStatus, setBatchStatus] = useState(initialDraft?.batchStatus || 'draft');
-  const [isBatchSaving, setIsBatchSaving] = useState(false);
-  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
-  const [lastValidation, setLastValidation] = useState<AgentValidation>(() => validateAgentTasks(initialDraft?.tasks || []));
-  const [isThinking, setIsThinking] = useState(false);
-  const [isExpanding, setIsExpanding] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
-  const [loadingBatchId, setLoadingBatchId] = useState<string | null>(null);
-  const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
-  const [batchHistory, setBatchHistory] = useState<AgentBatchSummary[]>([]);
-  const [historyError, setHistoryError] = useState('');
-  const [activePanel, setActivePanel] = useState<AgentPanelTab>(initialDraft?.tasks?.length ? 'tasks' : 'chat');
-  const [expandedTaskErrors, setExpandedTaskErrors] = useState<Set<number>>(new Set());
-  const [confirmAction, setConfirmAction] = useState<'expand' | 'run' | null>(null);
-  const [pendingCanvasActions, setPendingCanvasActions] = useState<CanvasAgentAction[]>([]);
-  const [pendingCanvasActionReason, setPendingCanvasActionReason] = useState('');
-  const [dragSourceIndex, setDragSourceIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-
   const {
     nodes,
     edges,
@@ -695,150 +843,40 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
     activeProviderIds,
     globalActiveModels,
     getModelsForNode,
+    isWorkflowRunning,
+    requestStopWorkflow,
   } = useStore();
 
+  const [messages, setMessages] = useState<AgentMessage[]>([
+    {
+      id: 'welcome',
+      role: 'assistant',
+      content: '告诉我你想怎么改画布。我只负责读取画布状态、生成画布动作、调用画布执行。',
+    },
+  ]);
+  const [input, setInput] = useState('');
+  const [isThinking, setIsThinking] = useState(false);
+  const [pendingRequest, setPendingRequest] = useState<PendingCanvasRequest | null>(null);
+  const [attachments, setAttachments] = useState<AgentAttachment[]>([]);
+  const [isReadingFiles, setIsReadingFiles] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const attachmentsRef = useRef<AgentAttachment[]>([]);
+  const agentAbortControllerRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
+
   const activeProvider = apiProviders.find((provider) => provider.id === (activeProviderIds?.chat || activeProviderId));
-  const imageModelId = globalActiveModels.image || getModelsForNode(NodeType.AI_IMAGE)[0] || '';
   const chatModelId = globalActiveModels.chat || getModelsForNode(NodeType.AI_CHAT)[0] || '';
-  const isGptImage2ImageModel = String(imageModelId || '').toLowerCase().startsWith('gpt-image-2');
-  const getTaskImageSizeValue = useCallback((task: AgentTask) => {
-    if (isGptImage2ImageModel && task.aspectRatio === '46:19' && !['2K', '4K'].includes(task.imageSize || '')) {
-      return '2K';
-    }
-    return task.imageSize || '1K';
-  }, [isGptImage2ImageModel]);
-  const readyTaskCount = useMemo(() => tasks.filter((task) => task.prompt.trim()).length, [tasks]);
-  const failedTaskCount = useMemo(() => tasks.filter((task) => task.status === 'failed').length, [tasks]);
-  const imageBoundTaskCount = useMemo(() => tasks.filter((task) => (task.imageUrls || []).length > 0).length, [tasks]);
-  const promptCharCount = useMemo(() => tasks.reduce((total, task) => total + task.prompt.trim().length, 0), [tasks]);
-  const hasRequirementMaterial = requirementText.trim().length > 0 || referenceImages.length > 0 || documentAssets.length > 0;
-  const documentImageCount = useMemo(
-    () => documentAssets.reduce((total, asset) => total + asset.images.length, 0),
-    [documentAssets]
-  );
-  const currentValidation = useMemo(
-    () => validateAgentTasks(tasks, referenceImages.length),
-    [referenceImages.length, tasks]
-  );
+  const imageModelId = globalActiveModels.image || getModelsForNode(NodeType.AI_IMAGE)[0] || '';
+  const selectedNode = selectedNodeId ? nodes.find((node) => node.id === selectedNodeId) : null;
 
-  useEffect(() => {
-    setLastValidation(currentValidation);
-  }, [currentValidation]);
-
-  useEffect(() => {
-    persistDraft({
-      batchId,
-      batchStatus,
-      requirementText,
-      tasks,
-      summary,
-      messages: messages.slice(-30),
-      referenceImages,
-      documentAssets,
-      storedReferenceImageCount,
-      savedAt: Date.now()
-    });
-  }, [batchId, batchStatus, documentAssets, messages, referenceImages, requirementText, storedReferenceImageCount, summary, tasks]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const toBatchItems = useCallback((sourceTasks: AgentTask[]): AgentBatchItemPayload[] => (
-    sourceTasks.map((task, index) => ({
-      id: task.id || `item-${index + 1}`,
-      title: task.title,
-      prompt: task.prompt,
-      aspectRatio: task.aspectRatio || '1:1',
-      imageSize: task.imageSize || '1K',
-      imageUrls: task.imageUrls || [],
-      status: task.status || 'draft',
-      error: task.error || '',
-      result: task.result,
-      nodeId: task.nodeId || ''
-    }))
-  ), []);
-
-  const saveBatchDraft = useCallback(async (sourceTasks = tasks, options?: { status?: string; approvedAt?: number | null }) => {
-    if (sourceTasks.length === 0 && !requirementText.trim()) return null;
-    setIsBatchSaving(true);
-    try {
-      const service = new AIService();
-      const saved = await service.saveAgentBatch({
-        id: batchId || undefined,
-        name: summary || `画布智能体批次 ${new Date().toLocaleString()}`,
-        summary,
-        requirementText,
-        status: options?.status || batchStatus,
-        modelId: chatModelId,
-        imageModelId,
-        referenceImageCount: referenceImages.length > 0 ? referenceImages.length : storedReferenceImageCount,
-        referenceImages,
-        documentAssets,
-        items: toBatchItems(sourceTasks),
-        approvedAt: options?.approvedAt ?? null
-      });
-      if (saved?.id && saved.id !== batchId) {
-        setBatchId(saved.id);
-      }
-      if (options?.status) {
-        setBatchStatus(options.status);
-      }
-      setLastSavedAt(Date.now());
-      return saved;
-    } catch (error) {
-      console.warn('Failed to save agent batch draft:', error);
-      return null;
-    } finally {
-      setIsBatchSaving(false);
-    }
-  }, [batchId, batchStatus, chatModelId, documentAssets, imageModelId, referenceImages, requirementText, storedReferenceImageCount, summary, tasks, toBatchItems]);
-
-  const patchBatchItem = useCallback(async (effectiveBatchId: string | null, itemId: string, patch: Partial<AgentTask>) => {
-    setTasks((prev) => prev.map((task) => (
-      (task.id || '') === itemId
-        ? { ...task, ...patch }
-        : task
-    )));
-    if (!effectiveBatchId) return;
-    try {
-      const service = new AIService();
-      const saved = await service.patchAgentBatchItem(effectiveBatchId, itemId, patch);
-      if (saved?.status) {
-        setBatchStatus(String(saved.status));
-      }
-      setLastSavedAt(Date.now());
-    } catch (error) {
-      console.warn('Failed to patch agent batch item:', error);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (tasks.length === 0 && !requirementText.trim()) return;
-    const timer = window.setTimeout(() => {
-      void saveBatchDraft();
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [requirementText, saveBatchDraft, tasks]);
-
-  const canvasSummary = useMemo(() => {
-    const counts = nodes.reduce<Record<string, number>>((acc, node) => {
-      const type = String(node.type || node.data?.type || 'UNKNOWN');
-      acc[type] = (acc[type] || 0) + 1;
-      return acc;
-    }, {});
-    return {
-      nodeCount: nodes.length,
-      edgeCount: edges.length,
-      nodeTypes: counts,
-      selectedChatModel: chatModelId,
-      selectedImageModel: imageModelId
-    };
-  }, [chatModelId, edges.length, imageModelId, nodes]);
-
-  const canvasStateForAgent = useMemo(() => ({
+  const canvasState = useMemo(() => ({
     selectedNodeId,
-    nodes: nodes.slice(0, 80).map((node) => ({
+    activeModels: {
+      chat: chatModelId,
+      image: imageModelId,
+    },
+    nodes: nodes.slice(0, 100).map((node) => ({
       id: node.id,
       type: node.data?.type || node.type,
       label: node.data?.label,
@@ -856,557 +894,277 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
       inputKeys: Object.keys(node.data?.inputs || {}),
       position: node.position,
     })),
-    edges: edges.slice(0, 140).map((edge) => ({
+    edges: edges.slice(0, 160).map((edge) => ({
       id: edge.id,
       source: edge.source,
       target: edge.target,
       sourceHandle: edge.sourceHandle,
       targetHandle: edge.targetHandle,
     })),
-  }), [edges, nodes, selectedNodeId]);
+  }), [chatModelId, edges, imageModelId, nodes, selectedNodeId]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, pendingRequest]);
+
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
+  useEffect(() => () => {
+    attachmentsRef.current.forEach((attachment) => {
+      const url = attachment.payload.url;
+      if (typeof url === 'string' && url.startsWith('blob:')) {
+        URL.revokeObjectURL(url);
+      }
+    });
+  }, []);
 
   const appendMessage = useCallback((message: Omit<AgentMessage, 'id'>) => {
-    setMessages((prev) => [...prev, { ...message, id: makeId() }]);
+    const next = { ...message, id: makeId() };
+    setMessages((prev) => [...prev, next]);
+    return next;
   }, []);
 
-  const loadBatchHistory = useCallback(async () => {
-    setIsHistoryLoading(true);
-    setHistoryError('');
-    try {
-      const service = new AIService();
-      const items = await service.listAgentBatches(50);
-      setBatchHistory(items);
-    } catch (error: any) {
-      const message = error?.message || '批次历史读取失败';
-      setHistoryError(message);
-      pushNotice('error', message);
-    } finally {
-      setIsHistoryLoading(false);
-    }
-  }, [pushNotice]);
+  const addAttachmentFiles = useCallback(async (files: File[], sourceLabel = '附件') => {
+    if (files.length === 0) return;
 
-  const toggleHistory = useCallback(() => {
-    setIsHistoryOpen((prev) => {
-      const next = !prev;
-      if (next) {
-        void loadBatchHistory();
-        setActivePanel('history');
-      }
-      return next;
-    });
-  }, [loadBatchHistory]);
-
-  const deleteHistoryBatch = useCallback(async (targetBatchId: string) => {
-    if (!window.confirm('确定删除这个历史批次吗？删除后不能恢复。')) return;
-    setDeletingBatchId(targetBatchId);
-    setHistoryError('');
+    setIsReadingFiles(true);
     try {
-      const service = new AIService();
-      await service.deleteAgentBatch(targetBatchId);
-      setBatchHistory((prev) => prev.filter((item) => item.id !== targetBatchId));
-      if (batchId === targetBatchId) {
-        setBatchId(null);
-        setBatchStatus('draft');
-        setRequirementText('');
-        setSummary('');
-        setTasks([]);
-        setReferenceImages([]);
-        setDocumentAssets([]);
-        setStoredReferenceImageCount(0);
-        setCreatedWorkflow(null);
-      }
-      pushNotice('success', '已删除历史批次');
-    } catch (error: any) {
-      const message = error?.message || '历史批次删除失败';
-      setHistoryError(message);
-      pushNotice('error', message);
-    } finally {
-      setDeletingBatchId(null);
-    }
-  }, [batchId, pushNotice]);
-
-  const loadHistoryBatch = useCallback(async (targetBatchId: string) => {
-    setLoadingBatchId(targetBatchId);
-    setHistoryError('');
-    try {
-      const service = new AIService();
-      const batch = await service.getAgentBatch(targetBatchId);
-      const nextTasks = Array.isArray(batch?.items)
-        ? batch.items.map(normalizeTask).filter((task: AgentTask | null): task is AgentTask => !!task)
-        : [];
-      const restoredReferenceImages = Array.isArray((batch as any)?.referenceImages)
-        ? (batch as any).referenceImages.map(String).filter(Boolean)
-        : [];
-      const restoredDocumentAssets = Array.isArray((batch as any)?.documentAssets)
-        ? (batch as any).documentAssets as DocumentAsset[]
-        : [];
-      setBatchId(batch.id);
-      setBatchStatus(String(batch.status || 'draft'));
-      setStoredReferenceImageCount(restoredReferenceImages.length || Number(batch.referenceImageCount || 0));
-      setRequirementText(String(batch.requirementText || ''));
-      setSummary(String(batch.summary || ''));
-      setTasks(nextTasks);
-      setReferenceImages(restoredReferenceImages);
-      setDocumentAssets(restoredDocumentAssets);
-      setCreatedWorkflow(null);
-      setLastSavedAt(Number(batch.updatedAt || Date.now()));
-      setLastValidation(validateAgentTasks(nextTasks, restoredReferenceImages.length));
-      setMessages([
-        defaultWelcomeMessage,
-        {
-          id: makeId(),
-          role: 'assistant',
-          content: restoredReferenceImages.length > 0
-            ? `已加载历史批次「${batch.name || batch.id}」，共 ${nextTasks.length} 个任务，并恢复了 ${restoredReferenceImages.length} 张图片素材。`
-            : `已加载历史批次「${batch.name || batch.id}」，共 ${nextTasks.length} 个任务。这个批次没有保存到图片素材，如果需求依赖表格/文档里的图片，请重新上传原始文件后再分析。`
-        }
-      ]);
-      setIsHistoryOpen(false);
-      setActivePanel('tasks');
-      pushNotice('success', `已加载批次：${batch.name || batch.id}`);
-    } catch (error: any) {
-      const message = error?.message || '批次加载失败';
-      setHistoryError(message);
-      pushNotice('error', message);
-    } finally {
-      setLoadingBatchId(null);
-    }
-  }, [pushNotice]);
-
-  const handleRequirementFile = useCallback(async (file?: File) => {
-    if (!file) return;
-    try {
-      const { text, images, warnings = [] } = await readRequirementFile(file);
-      const warningText = warnings.length > 0
-        ? `\n\n# 文件读取警告\n${warnings.map((warning) => `- ${warning}`).join('\n')}`
-        : '';
-      setRequirementText((prev) => [prev, `\n\n# 文件：${file.name}\n${text}`].filter(Boolean).join('\n'));
-      if (warningText) {
-        setRequirementText((prev) => `${prev}${warningText}`);
-      }
-      if (images.length > 0) {
-        setReferenceImages((prev) => [...prev, ...images]);
-        setStoredReferenceImageCount((prev) => prev + images.length);
-        setDocumentAssets((prev) => [
-          ...prev,
-          {
-            id: makeId(),
-            fileName: file.name,
-            textPreview: text.slice(0, 260),
-            createdAt: Date.now(),
-            images: images.map((src, index) => ({
-              id: `${file.name}-${Date.now()}-${index}`,
-              src,
-              index: index + 1,
-              assignedTaskIds: []
-            }))
-          }
-        ]);
-        setCreatedWorkflow(null);
-        setDocumentAssets((prev) => [
-          ...prev,
-          {
-            id: makeId(),
-            fileName: file.name,
-            textPreview: text.slice(0, 260),
-            createdAt: Date.now(),
-            images: images.map((src, index) => ({
-              id: `${file.name}-${Date.now()}-${index}`,
-              src,
-              index: index + 1,
-              assignedTaskIds: []
-            }))
-          }
-        ]);
-        setCreatedWorkflow(null);
-      }
+      const nextAttachments = await Promise.all(files.slice(0, 8).map((file) => buildAttachmentFromFile(file)));
+      setAttachments((prev) => [...prev, ...nextAttachments].slice(-12));
       appendMessage({
         role: 'assistant',
-        content: warnings.length > 0
-          ? `我已经读到文件「${file.name}」，但发现图片没有完整提取：${warnings.join('；')} 现在不能只靠这些图片 ID 拆任务，需要你补充真实图片素材。`
-          : images.length > 0
-          ? `我已经读到文件「${file.name}」，并提取到 ${images.length} 张表格内图片。接下来分析时我会把这些图片一起发给当前对话模型。`
-          : `我已经读到文件「${file.name}」。你可以告诉我按什么规则拆，或者直接说“分析并生成计划”。`
+        content: `已读取 ${nextAttachments.length} 个${sourceLabel}。你可以让我先整理内容和需求，确认后再导入画布。`,
       });
-      if (warnings.length > 0) {
-        pushNotice('warn', '表格里的图片没有完整提取，请补充真实图片素材');
-      } else {
-        pushNotice('success', `已读取需求文件：${file.name}`);
-      }
     } catch (error: any) {
-      pushNotice('error', error?.message || '需求文件读取失败');
+      appendMessage({ role: 'assistant', content: `读取附件失败：${error?.message || error}` });
+      pushNotice('error', '读取附件失败');
+    } finally {
+      setIsReadingFiles(false);
     }
   }, [appendMessage, pushNotice]);
 
-  const handleImageFiles = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    try {
-      const images = await Promise.all(Array.from(files).slice(0, 60).map((file) => fileToOptimizedImageDataUrl(file)));
-      setReferenceImages((prev) => [...prev, ...images]);
-      setStoredReferenceImageCount((prev) => prev + images.length);
-      setCreatedWorkflow(null);
-      appendMessage({ role: 'assistant', content: `我收到了 ${images.length} 张参考图。若需要一图对应一条任务，你可以直接告诉我”按上传顺序一一对应”。` });
-      pushNotice('success', `已导入 ${images.length} 张参考图`);
-    } catch {
-      pushNotice('error', '参考图读取失败');
-    }
-  }, [appendMessage, pushNotice]);
+  const handleAttachmentChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []) as File[];
+    event.target.value = '';
+    await addAttachmentFiles(files, '附件');
+  }, [addAttachmentFiles]);
 
-  const expandToCanvas = useCallback(async (taskOverride?: AgentTask[]) => {
-    const sourceTasks = taskOverride || tasks;
-    const validation = validateAgentTasks(sourceTasks, referenceImages.length);
-    setLastValidation(validation);
-    if (!validation.passed) {
-      const message = formatValidationMessage(validation);
-      appendMessage({ role: 'assistant', content: message });
-      pushNotice('error', '任务自检未通过，已阻止展开');
-      return null;
-    }
+  const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = Array.from(event.clipboardData.items || [])
+      .filter((item) => item.type.startsWith('image/'))
+      .map((item, index) => {
+        const file = item.getAsFile();
+        if (!file) return null;
+        if (file.name) return file;
+        const extension = item.type.split('/')[1] || 'png';
+        return new File([file], `pasted-image-${Date.now()}-${index + 1}.${extension}`, { type: item.type });
+      })
+      .filter((file): file is File => !!file)
+      .slice(0, 8);
 
-    const validTasks = sourceTasks.filter((task) => task.prompt.trim());
+    if (imageFiles.length === 0) return;
 
-    setIsExpanding(true);
-    try {
-      const center = reactFlow.project({
-        x: window.innerWidth / 2,
-        y: window.innerHeight / 2
-      });
-      const promptNodeIds: string[] = [];
-      const referenceNodeIds: string[] = [];
-      const imageNodeIds: string[] = [];
-      const itemIds: string[] = [];
-      const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(validTasks.length))));
-      const rowGap = 340;
-      const globalImageUrls = extractImageUrlsFromText(requirementText);
-      const taskImages = validTasks.map((task, index) => (
-        mergeUniqueImages(
-          task.imageUrls,
-          extractImageUrlsFromText(task.prompt),
-          referenceImages.length === validTasks.length ? [referenceImages[index]] : []
-        )
-      ));
-      const sharedImages = referenceImages.length > 0 && referenceImages.length !== validTasks.length
-        ? mergeUniqueImages(referenceImages)
-        : (
-          referenceImages.length === 0 && taskImages.every((items) => items.length === 0)
-            ? mergeUniqueImages(globalImageUrls)
-            : []
-        );
-      const hasReferenceInputs = sharedImages.length > 0 || taskImages.some((items) => items.length > 0);
-      const colGap = hasReferenceInputs ? 1120 : 820;
-      const startX = center.x - ((cols - 1) * colGap) / 2 - 260;
-      const startY = center.y - 180;
-      let sharedReferenceNodeId: string | null = null;
+    event.preventDefault();
+    event.stopPropagation();
+    void addAttachmentFiles(imageFiles, '粘贴图片');
+  }, [addAttachmentFiles]);
 
-      if (sharedImages.length > 0) {
-        sharedReferenceNodeId = addNode(
-          sharedImages.length > 1 ? NodeType.MULTI_IMAGE_UPLOAD : NodeType.IMAGE_UPLOAD,
-          { x: startX - 390, y: startY - 10 }
-        );
-        updateNodeData(sharedReferenceNodeId, {
-          label: sharedImages.length > 1 ? '共享产品图' : '共享产品图 1',
-          output: sharedImages.length > 1 ? sharedImages : sharedImages[0],
-          status: 'success',
-          meta: {
-            canvasAgent: true,
-            role: 'shared_reference_images',
-            imageCount: sharedImages.length
-          }
-        });
-        referenceNodeIds.push(sharedReferenceNodeId);
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => {
+      const target = prev.find((attachment) => attachment.id === id);
+      const url = target?.payload.url;
+      if (typeof url === 'string' && url.startsWith('blob:')) {
+        URL.revokeObjectURL(url);
       }
-
-      validTasks.forEach((task, index) => {
-        const col = index % cols;
-        const row = Math.floor(index / cols);
-        const promptId = addNode(NodeType.INPUT, { x: startX + col * colGap, y: startY + row * rowGap });
-        const taskImageRefs = taskImages[index] || [];
-        const referenceId = taskImageRefs.length > 0
-          ? addNode(
-            taskImageRefs.length > 1 ? NodeType.MULTI_IMAGE_UPLOAD : NodeType.IMAGE_UPLOAD,
-            { x: startX + col * colGap + 370, y: startY + row * rowGap }
-          )
-          : null;
-        const imageId = addNode(NodeType.AI_IMAGE, { x: startX + col * colGap + (hasReferenceInputs ? 760 : 410), y: startY + row * rowGap });
-        const itemId = task.id || `item-${index + 1}`;
-
-        updateNodeData(promptId, {
-          label: `提示词 ${index + 1}`,
-          config: { prompt: task.prompt },
-          output: task.prompt,
-          status: 'success',
-          meta: { canvasAgent: true, taskTitle: task.title }
-        });
-        if (referenceId) {
-          updateNodeData(referenceId, {
-            label: `产品图 ${index + 1}`,
-            output: taskImageRefs.length > 1 ? taskImageRefs : taskImageRefs[0],
-            status: 'success',
-            meta: {
-              canvasAgent: true,
-              role: 'task_reference_images',
-              taskTitle: task.title,
-              taskIndex: index + 1,
-              imageCount: taskImageRefs.length
-            }
-          });
-          referenceNodeIds.push(referenceId);
-        }
-        updateNodeData(imageId, {
-          label: task.title || `出图 ${index + 1}`,
-          config: {
-            prompt: '',
-            modelId: imageModelId,
-            aspectRatio: task.aspectRatio || '1:1',
-            imageSize: task.imageSize || '1K',
-            promptTemplate: 'free_mode',
-            enablePromptTemplate: false
-          },
-          meta: { canvasAgent: true, taskIndex: index + 1, taskTitle: task.title }
-        });
-        onConnect({
-          source: promptId,
-          sourceHandle: 'output',
-          target: imageId,
-          targetHandle: 'prompt'
-        });
-        const imageSourceNodeId = referenceId || sharedReferenceNodeId;
-        if (imageSourceNodeId) {
-          onConnect({
-            source: imageSourceNodeId,
-            sourceHandle: 'output',
-            target: imageId,
-            targetHandle: 'image'
-          });
-        }
-        promptNodeIds.push(promptId);
-        imageNodeIds.push(imageId);
-        itemIds.push(itemId);
-      });
-
-      const workflow = { promptNodeIds, referenceNodeIds, imageNodeIds, itemIds };
-      setCreatedWorkflow(workflow);
-            const sourceMatchesCurrent = validTasks.every((sourceTask, sourceIndex) => {
-        const sourceId = sourceTask.id || `item-${sourceIndex + 1}`;
-        return tasks.some((task, taskIndex) => (
-          (task.id || `item-${taskIndex + 1}`) === sourceId
-          && task.prompt === sourceTask.prompt
-        ));
-      });
-      const baseTasks = sourceMatchesCurrent ? tasks : sourceTasks;
-      const updatedIds = new Set<string>();
-      const nextTasks = baseTasks.map((task, index) => {
-        const itemId = task.id || `item-${index + 1}`;
-        const workflowIndex = itemIds.indexOf(itemId);
-        if (workflowIndex < 0) {
-          return { ...task, id: itemId };
-        }
-        updatedIds.add(itemId);
-        return {
-          ...task,
-          id: itemId,
-          imageUrls: mergeUniqueImages(task.imageUrls, taskImages[workflowIndex]),
-          status: task.status || 'draft',
-          nodeId: imageNodeIds[workflowIndex] || task.nodeId || ''
-        };
-      });
-      validTasks.forEach((task, index) => {
-        const itemId = task.id || `item-${index + 1}`;
-        if (updatedIds.has(itemId)) return;
-        nextTasks.push({
-          ...task,
-          id: itemId,
-          imageUrls: mergeUniqueImages(task.imageUrls, taskImages[index]),
-          status: task.status || 'draft',
-          nodeId: imageNodeIds[index] || task.nodeId || ''
-        });
-      });
-      setTasks(nextTasks);
-      void saveBatchDraft(nextTasks);
-      setTimeout(() => reactFlow.fitView({ duration: 500, padding: 0.18 }), 80);
-      pushNotice('success', `已展开 ${validTasks.length} 个出图节点`);
-      appendMessage({ role: 'assistant', content: `已把 ${validTasks.length} 个任务展开到画布。你可以检查节点提示词，没问题后点“批量跑图”。` });
-      return workflow;
-    } finally {
-      setIsExpanding(false);
-    }
-  }, [addNode, appendMessage, imageModelId, onConnect, pushNotice, reactFlow, referenceImages, saveBatchDraft, tasks, updateNodeData]);
-
-  const runCreatedWorkflow = useCallback(async (taskOverride?: AgentTask[], options?: { forceExpand?: boolean }) => {
-    const sourceTasks = taskOverride || tasks;
-    const validation = validateAgentTasks(sourceTasks, referenceImages.length);
-    setLastValidation(validation);
-    if (!validation.passed) {
-      const message = formatValidationMessage(validation);
-      appendMessage({ role: 'assistant', content: message });
-      pushNotice('error', '任务自检未通过，已阻止批量跑图');
-      return;
-    }
-
-    const isPartialRun = !!taskOverride && taskOverride.length < tasks.length;
-    const savedBatch = await saveBatchDraft(isPartialRun ? tasks : sourceTasks, { status: 'approved', approvedAt: Date.now() });
-    const effectiveBatchId = savedBatch?.id || batchId;
-    const canReuseWorkflow = !options?.forceExpand
-      && !!createdWorkflow
-      && createdWorkflow.imageNodeIds.length === sourceTasks.length
-      && createdWorkflow.itemIds.every((itemId, index) => itemId === (sourceTasks[index]?.id || `item-${index + 1}`));
-    const workflow = canReuseWorkflow ? createdWorkflow : await expandToCanvas(sourceTasks);
-    if (!workflow) return;
-
-    setIsRunning(true);
-    try {
-      for (const nodeId of workflow.promptNodeIds) {
-        await executeSingleNode(nodeId);
-      }
-      for (let index = 0; index < workflow.imageNodeIds.length; index += 1) {
-        const nodeId = workflow.imageNodeIds[index];
-        const itemId = workflow.itemIds[index] || sourceTasks[index]?.id || `item-${index + 1}`;
-        await patchBatchItem(effectiveBatchId, itemId, { status: 'running', error: '', nodeId });
-        await executeSingleNode(nodeId);
-        const freshNode = useStore.getState().nodes.find((node) => node.id === nodeId);
-        if (freshNode?.data.status === 'error') {
-          await patchBatchItem(effectiveBatchId, itemId, {
-            status: 'failed',
-            error: freshNode.data.error || '执行失败',
-            nodeId
-          });
-        } else {
-          await patchBatchItem(effectiveBatchId, itemId, {
-            status: 'success',
-            error: '',
-            result: freshNode?.data.output,
-            nodeId
-          });
-        }
-      }
-      pushNotice('success', '这批画布任务已提交完成');
-            appendMessage({ role: 'assistant', content: '这批任务已经按顺序提交完成。你可以在画布节点和图像历史里检查结果。' });
-    } finally {
-      setIsRunning(false);
-    }
-  }, [appendMessage, batchId, createdWorkflow, executeSingleNode, expandToCanvas, patchBatchItem, pushNotice, referenceImages.length, saveBatchDraft, tasks]);
-
-  const updateTasksFromParsed = useCallback((parsed: any) => {
-    const taskPayload = Array.isArray(parsed?.tasks)
-      ? parsed.tasks
-      : (
-        Array.isArray(parsed?.tool_calls)
-          ? parsed.tool_calls.find((call: any) => call?.tool === 'update_tasks' && Array.isArray(call?.parameters?.tasks))?.parameters?.tasks
-          : []
-      );
-    const normalized = Array.isArray(taskPayload)
-      ? taskPayload.map(normalizeTask).filter((task: AgentTask | null): task is AgentTask => !!task)
-      : [];
-    if (normalized.length > 0) {
-      setTasks(normalized.slice(0, 80));
-      setBatchStatus('draft');
-      setActivePanel('tasks');
-      setCreatedWorkflow(null);
-            setLastValidation(validateAgentTasks(normalized, referenceImages.length));
-    }
-    if (typeof parsed?.summary === 'string') {
-      setSummary(parsed.summary);
-    } else if (normalized.length > 0) {
-      setSummary(`已准备 ${normalized.length} 个出图任务`);
-    }
-    return normalized;
-  }, [referenceImages.length]);
-
-  const normalizeToolCalls = useCallback((parsed: any, text: string): AgentToolCall[] => {
-    const calls: AgentToolCall[] = Array.isArray(parsed?.tool_calls)
-      ? parsed.tool_calls
-          .map((call: any) => ({
-            tool: String(call?.tool || '') as AgentToolName,
-            parameters: typeof call?.parameters === 'object' && call.parameters ? call.parameters : {},
-            requires_confirmation: call?.requires_confirmation !== false,
-            reason: String(call?.reason || '')
-          }))
-          .filter((call: AgentToolCall) => ['update_tasks', 'expand_canvas', 'run_batch', 'retry_failed'].includes(call.tool))
-      : [];
-
-    const legacyAction = String(parsed?.action || 'none');
-    if (legacyAction === 'run') {
-      calls.push({ tool: 'run_batch', requires_confirmation: true, reason: '模型建议批量运行' });
-    } else if (legacyAction === 'expand') {
-      calls.push({ tool: 'expand_canvas', requires_confirmation: true, reason: '模型建议展开到画布' });
-    }
-
-    if (calls.length === 0 && wantsRun(text)) {
-      calls.push({ tool: 'run_batch', requires_confirmation: false, reason: '你明确要求批量跑图' });
-    } else if (calls.length === 0 && wantsExpand(text)) {
-      calls.push({ tool: 'expand_canvas', requires_confirmation: false, reason: '你明确要求展开到画布' });
-    }
-
-    return calls;
+      return prev.filter((attachment) => attachment.id !== id);
+    });
   }, []);
 
-  const executeToolCall = useCallback(async (tool: AgentToolName, taskSnapshot: AgentTask[]) => {
-    if (tool === 'expand_canvas') {
-      await expandToCanvas(taskSnapshot);
-      return;
+  const pauseAll = useCallback((notify = true) => {
+    stopRequestedRef.current = true;
+    agentAbortControllerRef.current?.abort();
+    agentAbortControllerRef.current = null;
+    requestStopWorkflow();
+    setPendingRequest(null);
+    setIsThinking(false);
+    if (notify) {
+      appendMessage({ role: 'assistant', content: '已暂停全局执行。你可以修改指令后重新发送。' });
     }
-    if (tool === 'run_batch') {
-      await runCreatedWorkflow(taskSnapshot);
-      return;
-    }
-    if (tool === 'retry_failed') {
-      const failedTasks = taskSnapshot.filter((task) => task.status === 'failed');
-      if (failedTasks.length === 0) {
-        appendMessage({ role: 'assistant', content: '当前批次没有记录到失败项，不需要重试。' });
-        return;
-      }
-      await runCreatedWorkflow(failedTasks, { forceExpand: true });
-    }
-  }, [appendMessage, expandToCanvas, runCreatedWorkflow]);
-
-  const handleToolCalls = useCallback(async (calls: AgentToolCall[], taskSnapshot: AgentTask[], userText: string) => {
-    const actionable = calls.filter((call) => call.tool !== 'update_tasks');
-    if (actionable.length === 0) return;
-
-    const call = actionable[actionable.length - 1];
-    const explicit = (
-      (call.tool === 'run_batch' && wantsRun(userText))
-      || (call.tool === 'expand_canvas' && wantsExpand(userText))
-      || call.requires_confirmation === false
-    );
-
-    const validation = validateAgentTasks(taskSnapshot, referenceImages.length);
-    setLastValidation(validation);
-    if (!validation.passed) {
-      appendMessage({ role: 'assistant', content: formatValidationMessage(validation) });
-      return;
-    }
-
-    if (explicit) {
-      await executeToolCall(call.tool, taskSnapshot);
-      return;
-    }
-
-    const label = call.tool === 'run_batch'
-      ? `批量运行 ${taskSnapshot.length} 个出图任务`
-      : call.tool === 'expand_canvas'
-        ? `展开 ${taskSnapshot.length} 个任务到画布`
-        : call.tool === 'retry_failed'
-          ? `重试失败任务`
-          : '执行工具动作';
-    appendMessage({ role: 'assistant', content: `我准备执行：${label}。${call.requires_confirmation ? '请确认后再告诉我"是"来执行。' : '现在直接执行。'}` });
-  }, [appendMessage, executeToolCall, referenceImages.length]);
+  }, [appendMessage, requestStopWorkflow]);
 
   const executeCanvasActions = useCallback(async (actions: CanvasAgentAction[]) => {
     const createdNodeIds: string[] = [];
     const getFreshNodes = () => useStore.getState().nodes;
+    const getFreshEdges = () => useStore.getState().edges;
     const resolveNodeId = (value?: string | null) => {
       const raw = String(value || '').trim();
-      if (!raw || raw === 'selected' || raw === '$selected') return selectedNodeId;
+      if (!raw || raw === 'selected' || raw === '$selected') return useStore.getState().selectedNodeId || selectedNodeId;
       if (raw === 'last_created') return createdNodeIds[createdNodeIds.length - 1] || null;
       return getFreshNodes().some((node) => node.id === raw) ? raw : null;
     };
+    const nodeLabel = (id: string) => {
+      const node = getFreshNodes().find((item) => item.id === id);
+      return node?.data?.label || id;
+    };
+    const hasUsableOutput = (node: any) => {
+      const output = node?.data?.output;
+      if (output === undefined || output === null) return false;
+      if (typeof output === 'string') return output.trim().length > 0;
+      if (Array.isArray(output)) return output.length > 0;
+      return true;
+    };
+    const isUploadNodeType = (type?: string) => (
+      type === NodeType.IMAGE_UPLOAD || type === NodeType.MULTI_IMAGE_UPLOAD || type === NodeType.FILE_UPLOAD
+    );
+    const getNodeType = (id: string) => {
+      const node = getFreshNodes().find((item) => item.id === id);
+      return (node?.data?.type || node?.type) as NodeType | undefined;
+    };
+    const inferTargetHandle = (
+      sourceType?: NodeType,
+      targetType?: NodeType,
+      requested?: string
+    ) => {
+      if (requested) return requested;
+      if (targetType === NodeType.TABLE_PARSE) return 'file';
+      if (targetType === NodeType.TASK_SELECT || targetType === NodeType.BATCH_EXECUTE) return 'tasks';
+      if (targetType === NodeType.STYLE_GUIDE) {
+        return isUploadNodeType(sourceType) ? 'image' : 'task';
+      }
+      if (targetType === NodeType.PRODUCT_IMAGE_MATCH) {
+        if (isUploadNodeType(sourceType) || sourceType === NodeType.AI_IMAGE) return 'image';
+        if (sourceType === NodeType.INPUT || sourceType === NodeType.AI_CHAT || sourceType === NodeType.STYLE_GUIDE) return 'prompt';
+        return 'task';
+      }
+      if (targetType === NodeType.AI_IMAGE) {
+        if (
+          isUploadNodeType(sourceType)
+          || sourceType === NodeType.PRODUCT_IMAGE_MATCH
+          || sourceType === NodeType.AI_IMAGE
+        ) return 'image';
+        if (sourceType === NodeType.BATCH_EXECUTE) return 'batch';
+        return 'prompt';
+      }
+      if (targetType === NodeType.AI_CHAT) {
+        if (isUploadNodeType(sourceType) || sourceType === NodeType.AI_IMAGE || sourceType === NodeType.PRODUCT_IMAGE_MATCH) return 'image';
+        if (sourceType === NodeType.STYLE_GUIDE) return 'style';
+        return 'prompt';
+      }
+      if (targetType === NodeType.AI_VIDEO) {
+        if (isUploadNodeType(sourceType) || sourceType === NodeType.AI_IMAGE) return 'image';
+        return 'prompt';
+      }
+      if (targetType === NodeType.AI_AUDIO) return 'prompt';
+      return undefined;
+    };
+    const inferSourceHandle = (
+      sourceType?: NodeType,
+      targetType?: NodeType,
+      targetHandle?: string,
+      requested?: string
+    ) => {
+      if (requested) return requested;
+      if (sourceType === NodeType.TASK_SELECT) {
+        if (targetHandle === 'image') return 'image';
+        if (targetHandle === 'task') return 'task';
+        return 'prompt';
+      }
+      if (sourceType === NodeType.STYLE_GUIDE) {
+        if (targetHandle === 'style') return 'style';
+        return 'prompt';
+      }
+      if (sourceType === NodeType.PRODUCT_IMAGE_MATCH) {
+        if (targetHandle === 'prompt') return 'report';
+        return 'image';
+      }
+      if (sourceType === NodeType.BATCH_EXECUTE) return 'batch';
+      if (sourceType === NodeType.TABLE_PARSE) return 'output';
+      if (sourceType === NodeType.INPUT || isUploadNodeType(sourceType)) return 'output';
+      if (
+        sourceType === NodeType.AI_CHAT
+        || sourceType === NodeType.AI_IMAGE
+        || sourceType === NodeType.AI_AUDIO
+        || sourceType === NodeType.AI_VIDEO
+        || sourceType === NodeType.OUTPUT
+      ) return undefined;
+      return undefined;
+    };
+    const connectToTarget = (
+      sourceId: string,
+      targetId: string,
+      requestedSourceHandle?: string,
+      requestedTargetHandle?: string
+    ) => {
+      const targetNode = getFreshNodes().find((node) => node.id === targetId);
+      const targetType = targetNode?.data?.type || targetNode?.type;
+      const sourceType = getNodeType(sourceId);
+      const targetHandle = inferTargetHandle(sourceType, targetType as NodeType | undefined, requestedTargetHandle);
+      const sourceHandle = inferSourceHandle(sourceType, targetType as NodeType | undefined, targetHandle, requestedSourceHandle);
+      const duplicate = getFreshEdges().some((edge) => (
+        edge.source === sourceId
+        && edge.target === targetId
+        && (edge.sourceHandle || null) === (sourceHandle || null)
+        && (edge.targetHandle || null) === (targetHandle || null)
+      ));
+      if (duplicate || sourceId === targetId) return;
+      onConnect({
+        source: sourceId,
+        sourceHandle: sourceHandle || null,
+        target: targetId,
+        targetHandle: targetHandle || null,
+      });
+    };
+    const executeNodeWithUpstream = async (targetId: string, visited = new Set<string>()): Promise<string[]> => {
+      if (visited.has(targetId) || stopRequestedRef.current) return [];
+      visited.add(targetId);
 
-    const summaries: string[] = [];
+      const ranLabels: string[] = [];
+      const deps = getFreshEdges().filter((edge) => edge.target === targetId);
+      for (const edge of deps) {
+        if (stopRequestedRef.current) break;
+        const sourceNode = getFreshNodes().find((node) => node.id === edge.source);
+        if (!sourceNode) continue;
+
+        ranLabels.push(...await executeNodeWithUpstream(sourceNode.id, visited));
+
+        const freshSource = getFreshNodes().find((node) => node.id === edge.source);
+        if (!freshSource) continue;
+        const sourceType = freshSource.data?.type || freshSource.type;
+
+        if (isUploadNodeType(sourceType) && !hasUsableOutput(freshSource)) {
+          continue;
+        }
+        if (freshSource.data?.status === 'success') {
+          continue;
+        }
+
+        await executeSingleNode(freshSource.id);
+        ranLabels.push(nodeLabel(freshSource.id));
+
+        const afterRun = getFreshNodes().find((node) => node.id === freshSource.id);
+        if (afterRun?.data?.status === 'error') {
+          throw new Error(`上游节点「${nodeLabel(freshSource.id)}」执行失败：${afterRun.data.error || '未知错误'}`);
+        }
+      }
+
+      return ranLabels;
+    };
+    const results: CanvasToolResult[] = [];
 
     for (const action of actions) {
+      if (stopRequestedRef.current) {
+        results.push({ tool: action.type, ok: false, message: '已暂停，后续画布动作没有继续执行。' });
+        break;
+      }
+
       if (action.type === 'explain_canvas') {
-        summaries.push(`已读取画布：${nodes.length} 个节点，${edges.length} 条连线。`);
+        results.push({
+          tool: action.type,
+          ok: true,
+          message: `当前画布有 ${getFreshNodes().length} 个节点、${getFreshEdges().length} 条连线。选中节点：${resolveNodeId('selected') || '无'}。`,
+        });
         continue;
       }
 
@@ -1414,39 +1172,52 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
         const targetId = resolveNodeId(action.nodeId);
         const targetNode = targetId ? getFreshNodes().find((node) => node.id === targetId) : null;
         if (!targetId || !targetNode) {
-          summaries.push('没有找到要修改的节点。');
+          results.push({ tool: action.type, ok: false, message: '没有找到要修改的节点。' });
           continue;
         }
 
         const nextConfig: Record<string, any> = { ...(action.config || {}) };
         if (action.prompt !== undefined) nextConfig.prompt = action.prompt;
+        const nextModelId = String(nextConfig.modelId || targetNode.data?.config?.modelId || '').toLowerCase();
         if (
-          String(targetNode.data?.config?.modelId || '').toLowerCase().startsWith('gpt-image-2')
+          nextModelId.startsWith('gpt-image-2')
           && nextConfig.aspectRatio === '46:19'
           && !['2K', '4K'].includes(String(nextConfig.imageSize || ''))
         ) {
           nextConfig.imageSize = '2K';
         }
-        updateNodeData(targetId, { config: nextConfig });
-        summaries.push(`已修改节点「${targetNode.data?.label || targetId}」。`);
+
+        updateNodeData(targetId, {
+          ...(action.label ? { label: action.label } : {}),
+          config: nextConfig,
+        });
+        results.push({
+          tool: action.type,
+          ok: true,
+          nodeId: targetId,
+          message: `已修改「${targetNode.data?.label || targetId}」。`,
+        });
         continue;
       }
 
       if (action.type === 'create_node') {
         const nodeType = resolveCanvasNodeType(action.nodeType);
         if (!nodeType) {
-          summaries.push(`无法创建未知节点类型：${action.nodeType || '未指定'}`);
+          results.push({ tool: action.type, ok: false, message: `无法创建未知节点类型：${action.nodeType || '未指定'}` });
           continue;
         }
 
         const sourceId = resolveNodeId(action.connectFromId || action.sourceId);
-        const selectedNode = selectedNodeId ? getFreshNodes().find((node) => node.id === selectedNodeId) : null;
+        const baseNode = resolveNodeId('selected')
+          ? getFreshNodes().find((node) => node.id === resolveNodeId('selected'))
+          : null;
         const position = {
-          x: Number(action.position?.x ?? ((selectedNode?.position?.x ?? 120) + 360)),
-          y: Number(action.position?.y ?? (selectedNode?.position?.y ?? 120)),
+          x: Number(action.position?.x ?? ((baseNode?.position?.x ?? 120) + 360)),
+          y: Number(action.position?.y ?? (baseNode?.position?.y ?? 120)),
         };
-        const newNodeId = addNode(nodeType, position, sourceId || undefined);
+        const newNodeId = addNode(nodeType, position);
         createdNodeIds.push(newNodeId);
+
         if (action.config || action.prompt || action.label) {
           updateNodeData(newNodeId, {
             ...(action.label ? { label: action.label } : {}),
@@ -1456,7 +1227,247 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
             },
           });
         }
-        summaries.push(`已创建节点「${action.label || nodeType}」。`);
+        if (sourceId) {
+          connectToTarget(sourceId, newNodeId, action.sourceHandle, action.targetHandle);
+        }
+
+        results.push({
+          tool: action.type,
+          ok: true,
+          nodeId: newNodeId,
+          message: `已创建「${action.label || nodeType}」：${newNodeId}。`,
+        });
+        continue;
+      }
+
+      if (action.type === 'parse_spreadsheet_attachment') {
+        const requestedId = action.attachmentId || action.attachmentIds?.[0];
+        const spreadsheetAttachments = attachments.filter((attachment) => attachment.kind === 'xlsx' && attachment.spreadsheet);
+        const targetAttachment = requestedId
+          ? spreadsheetAttachments.find((attachment) => attachment.id === requestedId)
+          : (spreadsheetAttachments.length === 1 ? spreadsheetAttachments[0] : null);
+
+        if (!targetAttachment?.spreadsheet) {
+          results.push({
+            tool: action.type,
+            ok: false,
+            message: spreadsheetAttachments.length === 0
+              ? '没有可解析的表格附件。请先上传 .xlsx、.xls 或 .csv 文件。'
+              : '有多个表格附件，请指定要解析的 attachmentId。',
+          });
+          continue;
+        }
+
+        const analysis = targetAttachment.spreadsheet;
+        const detail = {
+          fileName: targetAttachment.name,
+          sheetCount: analysis.sheetCount,
+          embeddedImageCount: analysis.embeddedImageCount,
+          taskLikeRowCount: analysis.taskLikeRowCount,
+          sheets: analysis.sheets.map((sheet) => ({
+            name: sheet.name,
+            rowCount: sheet.rowCount,
+            columnCount: sheet.columnCount,
+            headerRow: sheet.headerRowIndex + 1,
+            detectedColumns: sheet.detectedColumns.filter((column) => column.role !== 'unknown'),
+            sampleRows: sheet.sampleRows.slice(0, 8),
+          })),
+        };
+
+        results.push({
+          tool: action.type,
+          ok: true,
+          message: `表格解析结果：\n${JSON.stringify(detail, null, 2).slice(0, 12000)}`,
+        });
+        continue;
+      }
+
+      if (action.type === 'extract_spreadsheet_images') {
+        const requestedId = action.attachmentId || action.attachmentIds?.[0];
+        const spreadsheetAttachments = attachments.filter((attachment) => attachment.kind === 'xlsx');
+        const targetAttachment = requestedId
+          ? spreadsheetAttachments.find((attachment) => attachment.id === requestedId)
+          : (spreadsheetAttachments.length === 1 ? spreadsheetAttachments[0] : null);
+
+        if (!targetAttachment) {
+          results.push({
+            tool: action.type,
+            ok: false,
+            message: spreadsheetAttachments.length === 0
+              ? '没有可提取图片的表格附件。请先上传 .xlsx 文件。'
+              : '有多个表格附件，请指定要提取图片的 attachmentId。',
+          });
+          continue;
+        }
+
+        const maxImages = Math.max(1, Math.min(80, Math.floor(action.maxImages || 30)));
+        const extractedImages = (targetAttachment.spreadsheetImages || []).slice(0, maxImages);
+        const detail = {
+          fileName: targetAttachment.name,
+          totalImages: targetAttachment.spreadsheetImages?.length || 0,
+          returnedImages: extractedImages.length,
+          images: extractedImages.map((image) => ({
+            id: image.id,
+            sheetName: image.sheetName,
+            rowNumber: image.rowNumber,
+            columnNumber: image.columnNumber,
+            mime: image.mime,
+            mediaPath: image.mediaPath,
+            name: image.name,
+          })),
+        };
+
+        results.push({
+          tool: action.type,
+          ok: extractedImages.length > 0,
+          message: extractedImages.length > 0
+            ? `表格图片提取结果：\n${JSON.stringify(detail, null, 2)}`
+            : `没有从「${targetAttachment.name}」里提取到可用图片。`,
+        });
+        continue;
+      }
+
+      if (action.type === 'attach_file_to_canvas') {
+        const requestedIds = [
+          ...(action.attachmentIds || []),
+          ...(action.attachmentId ? [action.attachmentId] : []),
+        ].filter(Boolean);
+        const requestedSpreadsheetImageIds = new Set(action.spreadsheetImageIds || []);
+        const selectedAttachments = requestedIds.length > 0
+          ? attachments.filter((attachment) => requestedIds.includes(attachment.id))
+          : (requestedSpreadsheetImageIds.size > 0
+            ? attachments.filter((attachment) => (
+              (attachment.spreadsheetImages || []).some((image) => requestedSpreadsheetImageIds.has(image.id))
+            ))
+            : (attachments.length === 1 ? attachments : []));
+        const connectTargetId = resolveNodeId(action.targetId || action.nodeId);
+
+        if (selectedAttachments.length === 0) {
+          results.push({
+            tool: action.type,
+            ok: false,
+            message: attachments.length === 0
+              ? '还没有选择附件。请先点击输入框旁边的回形针选择文件。'
+              : '没有找到指定附件，请重新选择文件。',
+          });
+          continue;
+        }
+
+        const baseNode = connectTargetId
+          ? getFreshNodes().find((node) => node.id === connectTargetId)
+          : null;
+        const basePosition = {
+          x: Number(action.position?.x ?? ((baseNode?.position?.x ?? 120) - 360)),
+          y: Number(action.position?.y ?? (baseNode?.position?.y ?? 120)),
+        };
+        const allImages = selectedAttachments.every((attachment) => attachment.kind === 'image');
+        const createdIds: string[] = [];
+        let importedSpreadsheetImageCount = 0;
+
+        if (selectedAttachments.length > 1 && allImages) {
+          const newNodeId = addNode(NodeType.MULTI_IMAGE_UPLOAD, basePosition);
+          createdIds.push(newNodeId);
+          updateNodeData(newNodeId, {
+            label: `多图上传 (${selectedAttachments.length})`,
+            output: selectedAttachments.map((attachment) => attachment.payload.data || attachment.payload.url).filter(Boolean),
+            status: 'success',
+          });
+          if (connectTargetId) connectToTarget(newNodeId, connectTargetId, action.sourceHandle, action.targetHandle);
+        } else {
+          selectedAttachments.forEach((attachment, index) => {
+            if (attachment.kind === 'xlsx' && attachment.spreadsheetImages?.length) {
+              const targetType = connectTargetId ? getNodeType(connectTargetId) : undefined;
+              const selectedSpreadsheetImages = requestedSpreadsheetImageIds.size > 0
+                ? attachment.spreadsheetImages.filter((image) => requestedSpreadsheetImageIds.has(image.id))
+                : attachment.spreadsheetImages;
+              const shouldCreateFileNode = requestedSpreadsheetImageIds.size === 0 || targetType === NodeType.TABLE_PARSE;
+              let fileNodeId: string | null = null;
+              let imageNodeId: string | null = null;
+
+              if (requestedSpreadsheetImageIds.size > 0 && selectedSpreadsheetImages.length === 0) {
+                return;
+              }
+
+              if (shouldCreateFileNode) {
+                fileNodeId = addNode(NodeType.FILE_UPLOAD, {
+                  x: basePosition.x,
+                  y: basePosition.y + index * 300,
+                });
+                createdIds.push(fileNodeId);
+                updateNodeData(fileNodeId, {
+                  label: attachment.name,
+                  output: attachment.payload,
+                  status: 'success',
+                });
+              }
+
+              if (selectedSpreadsheetImages.length > 0) {
+                importedSpreadsheetImageCount += selectedSpreadsheetImages.length;
+                const imageNodeType = selectedSpreadsheetImages.length === 1 ? NodeType.IMAGE_UPLOAD : NodeType.MULTI_IMAGE_UPLOAD;
+                imageNodeId = addNode(imageNodeType, {
+                  x: basePosition.x,
+                  y: basePosition.y + index * 300 + (fileNodeId ? 240 : 0),
+                });
+                createdIds.push(imageNodeId);
+                updateNodeData(imageNodeId, {
+                  label: requestedSpreadsheetImageIds.size > 0
+                    ? `${attachment.name} 选中表内图片 (${selectedSpreadsheetImages.length})`
+                    : `${attachment.name} 表内图片`,
+                  output: imageNodeType === NodeType.IMAGE_UPLOAD
+                    ? selectedSpreadsheetImages[0]?.dataUrl
+                    : selectedSpreadsheetImages.map((image) => image.dataUrl),
+                  status: 'success',
+                  meta: {
+                    spreadsheetImageMap: selectedSpreadsheetImages.map((image) => ({
+                      id: image.id,
+                      sheetName: image.sheetName,
+                      rowNumber: image.rowNumber,
+                      columnNumber: image.columnNumber,
+                      mediaPath: image.mediaPath,
+                    })),
+                  },
+                });
+              }
+
+              if (connectTargetId) {
+                const xlsxSourceId = targetType === NodeType.TABLE_PARSE ? fileNodeId : imageNodeId || fileNodeId;
+                if (xlsxSourceId) connectToTarget(xlsxSourceId, connectTargetId, action.sourceHandle, action.targetHandle);
+              }
+              return;
+            }
+
+            const nodeType = attachment.kind === 'image' ? NodeType.IMAGE_UPLOAD : NodeType.FILE_UPLOAD;
+            const newNodeId = addNode(nodeType, {
+              x: basePosition.x,
+              y: basePosition.y + index * 240,
+            });
+            createdIds.push(newNodeId);
+            updateNodeData(newNodeId, {
+              label: attachment.name,
+              output: attachment.kind === 'image'
+                ? (attachment.payload.data || attachment.payload.url || '')
+                : attachment.payload,
+              status: 'success',
+            });
+            if (connectTargetId) connectToTarget(newNodeId, connectTargetId, action.sourceHandle, action.targetHandle);
+          });
+        }
+
+        if (createdIds.length === 0 && requestedSpreadsheetImageIds.size > 0) {
+          results.push({
+            tool: action.type,
+            ok: false,
+            message: '没有找到指定的表格图片 id，请先提取表格图片并使用返回的 image id。',
+          });
+          continue;
+        }
+
+        results.push({
+          tool: action.type,
+          ok: true,
+          nodeIds: createdIds,
+          message: `已把 ${selectedAttachments.length} 个附件放到画布：${selectedAttachments.map((attachment) => attachment.name).join('、')}。${importedSpreadsheetImageCount > 0 ? `已导入表内图片 ${importedSpreadsheetImageCount} 张。` : ''}`,
+        });
         continue;
       }
 
@@ -1464,1266 +1475,644 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
         const sourceId = resolveNodeId(action.sourceId);
         const targetId = resolveNodeId(action.targetId || action.nodeId);
         if (!sourceId || !targetId) {
-          summaries.push('连线失败：没有找到源节点或目标节点。');
+          results.push({ tool: action.type, ok: false, message: '连线失败：没有找到源节点或目标节点。' });
           continue;
         }
-        onConnect({ source: sourceId, target: targetId });
-        summaries.push('已连接节点。');
+        connectToTarget(sourceId, targetId, action.sourceHandle, action.targetHandle);
+        results.push({
+          tool: action.type,
+          ok: true,
+          nodeIds: [sourceId, targetId],
+          message: `已连接「${nodeLabel(sourceId)}」到「${nodeLabel(targetId)}」。`,
+        });
         continue;
       }
 
       if (action.type === 'run_selected') {
         const targetId = resolveNodeId('selected');
         if (!targetId) {
-          summaries.push('没有选中可运行节点。');
+          results.push({ tool: action.type, ok: false, message: '没有选中可运行节点。' });
           continue;
         }
-        await executeSingleNode(targetId);
-        summaries.push('已运行选中节点。');
+        let upstreamRan: string[] = [];
+        try {
+          upstreamRan = await executeNodeWithUpstream(targetId);
+          await executeSingleNode(targetId);
+        } catch (error: any) {
+          results.push({ tool: action.type, ok: false, message: error?.message || '运行节点失败。' });
+          continue;
+        }
+        if (stopRequestedRef.current) {
+          results.push({ tool: action.type, ok: false, message: '已暂停，选中节点执行已停止。' });
+          continue;
+        }
+        results.push({
+          tool: action.type,
+          ok: true,
+          nodeId: targetId,
+          message: `${upstreamRan.length > 0 ? `已先运行上游：${Array.from(new Set(upstreamRan)).join('、')}。\n` : ''}已运行选中节点「${nodeLabel(targetId)}」。`,
+        });
         continue;
       }
 
       if (action.type === 'run_node') {
         const targetId = resolveNodeId(action.nodeId);
         if (!targetId) {
-          summaries.push('没有找到要运行的节点。');
+          results.push({ tool: action.type, ok: false, message: '没有找到要运行的节点。' });
           continue;
         }
-        await executeSingleNode(targetId);
-        summaries.push('已运行指定节点。');
+        let upstreamRan: string[] = [];
+        try {
+          upstreamRan = await executeNodeWithUpstream(targetId);
+          await executeSingleNode(targetId);
+        } catch (error: any) {
+          results.push({ tool: action.type, ok: false, message: error?.message || '运行节点失败。' });
+          continue;
+        }
+        if (stopRequestedRef.current) {
+          results.push({ tool: action.type, ok: false, message: '已暂停，节点执行已停止。' });
+          continue;
+        }
+        results.push({
+          tool: action.type,
+          ok: true,
+          nodeId: targetId,
+          message: `${upstreamRan.length > 0 ? `已先运行上游：${Array.from(new Set(upstreamRan)).join('、')}。\n` : ''}已运行「${nodeLabel(targetId)}」。`,
+        });
         continue;
       }
 
       if (action.type === 'run_all_image_nodes') {
         const imageNodes = getFreshNodes().filter((node) => node.data?.type === NodeType.AI_IMAGE);
+        const upstreamRanAll: string[] = [];
         for (const node of imageNodes) {
-          await executeSingleNode(node.id);
+          if (stopRequestedRef.current) break;
+          try {
+            upstreamRanAll.push(...await executeNodeWithUpstream(node.id));
+            await executeSingleNode(node.id);
+          } catch (error: any) {
+            results.push({ tool: action.type, ok: false, message: error?.message || `运行「${nodeLabel(node.id)}」失败。` });
+          }
         }
-        summaries.push(`已运行 ${imageNodes.length} 个图像节点。`);
+        if (stopRequestedRef.current) {
+          results.push({ tool: action.type, ok: false, message: '已暂停，剩余图像节点没有继续运行。' });
+          continue;
+        }
+        results.push({
+          tool: action.type,
+          ok: true,
+          nodeIds: imageNodes.map((node) => node.id),
+          message: `${upstreamRanAll.length > 0 ? `已先运行上游：${Array.from(new Set(upstreamRanAll)).join('、')}。\n` : ''}已运行 ${imageNodes.length} 个图像节点。`,
+        });
       }
     }
 
-    const message = summaries.length > 0 ? summaries.join('\n') : '没有可执行的画布动作。';
-    pushNotice('success', '画布动作已执行');
-    return message;
-  }, [addNode, edges.length, executeSingleNode, nodes.length, onConnect, pushNotice, selectedNodeId, updateNodeData]);
+    if (results.some((result) => result.ok)) {
+      pushNotice('success', '画布动作已执行');
+    }
+    return results;
+  }, [addNode, attachments, executeSingleNode, onConnect, pushNotice, selectedNodeId, updateNodeData]);
 
-  const sendAgentMessage = useCallback(async (rawMessage?: string) => {
-    const text = (rawMessage ?? chatInput).trim();
-    if (!text) return;
+  const shouldConfirmActions = useCallback((actions: CanvasAgentAction[], parsed: any, userText: string) => {
+    if (parsed?.needsConfirmation === true || parsed?.needs_confirmation === true) return true;
+    if (actions.some((action) => action.requiresConfirmation)) return true;
+    const writeActions = actions.filter((action) => (
+      action.type === 'create_node'
+      || action.type === 'update_node_config'
+      || action.type === 'attach_file_to_canvas'
+      || action.type === 'connect_nodes'
+    ));
+    const runActions = actions.filter((action) => (
+      action.type === 'run_node'
+      || action.type === 'run_selected'
+      || action.type === 'run_all_image_nodes'
+    ));
+    if (actions.some((action) => action.type === 'run_all_image_nodes') && !(wantsRun(userText) && wantsMany(userText))) return true;
+    if (actions.filter((action) => action.type === 'create_node').length > 3) return true;
+    if (writeActions.length > 4) return true;
+    if (runActions.length > 1) return true;
+    if (runActions.length > 0 && writeActions.length > 0) return true;
+    if (actions.some((action) => action.type === 'attach_file_to_canvas' && (
+      (action.attachmentIds?.length || 0) > 1
+      || (!action.attachmentId && !action.attachmentIds?.length && attachments.length > 1)
+    ))) return true;
+    if (actions.some((action) => {
+      if (action.type !== 'run_node') return false;
+      const targetId = action.nodeId === 'selected'
+        ? useStore.getState().selectedNodeId
+        : action.nodeId;
+      const node = targetId ? useStore.getState().nodes.find((item) => item.id === targetId) : null;
+      return node?.data?.type === NodeType.BATCH_EXECUTE;
+    })) return true;
+    if (actions.some((action) => {
+      const range = action.config
+        ? Number(action.config.endIndex || 0) - Number(action.config.startIndex || 1) + 1
+        : 0;
+      return range > 5;
+    })) return true;
+    return false;
+  }, [attachments.length]);
 
-    setChatInput('');
-    appendMessage({ role: 'user', content: text });
-    setIsThinking(true);
+  const callAgentModel = useCallback(async (params: {
+    userText: string;
+    conversation: AgentMessage[];
+    toolResults: CanvasToolResult[];
+    step: number;
+  }) => {
+    if (!activeProvider?.apiKey || !activeProvider?.baseUrl || !chatModelId) {
+      throw new Error('现在没有可用的对话模型。请先在模型枢纽选择可用对话模型和 API 配置。');
+    }
 
+    const attachmentImages = attachments
+      .flatMap((attachment) => {
+        if (attachment.kind === 'image') return [attachment.payload.data || attachment.payload.url];
+        return (attachment.spreadsheetImages || []).map((image) => image.dataUrl);
+      })
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .slice(0, 8);
+    const service = new AIService();
+    const controller = new AbortController();
+    agentAbortControllerRef.current = controller;
+    let response: any;
     try {
-      if (pendingCanvasActions.length > 0 && confirmsPendingAction(text)) {
-        const result = await executeCanvasActions(pendingCanvasActions);
-        setPendingCanvasActions([]);
-        setPendingCanvasActionReason('');
-        appendMessage({ role: 'assistant', content: result });
-        return;
-      }
-
-      if (!activeProvider?.apiKey || !activeProvider?.baseUrl || !chatModelId) {
-        const fallback = buildFallbackTasks(`${requirementText}\n${text}`.trim());
-        if (fallback.length > 0) {
-          setTasks(fallback);
-          setSummary('没有可用对话模型，已按文本拆成基础任务草案。');
-                    setLastValidation(validateAgentTasks(fallback, referenceImages.length));
-        }
-        appendMessage({
-          role: 'assistant',
-          content: '我现在没有可用的对话模型。先按文本行给你拆了一个基础草案；如果要真正沟通和推理，需要先在模型枢纽选中可用的对话模型。'
-        });
-        return;
-      }
-
-      const service = new AIService();
-      const response = await service.executeNode(
-        `canvas-agent-chat-${Date.now()}`,
+      response = await service.executeNode(
+        `canvas-agent-${Date.now()}-${params.step}`,
         NodeType.AI_CHAT,
         {
           modelId: chatModelId,
-          systemInstruction: buildAgentSystemPrompt()
+          systemInstruction: buildAgentSystemPrompt(),
         },
-        {
-          prompt: buildAgentUserPayload({
-            userMessage: text,
-            requirementText,
-            referenceImageCount: referenceImages.length,
-            documentAssets,
-            tasks,
-            messages,
-            canvasSummary,
-            canvasState: canvasStateForAgent
-          }),
-          ...(referenceImages.length > 0 ? { image: referenceImages.slice(0, 12) } : {})
-        },
+      {
+        prompt: buildAgentPayload({
+          userMessage: params.userText,
+          messages: params.conversation,
+          canvasState,
+          attachments,
+          toolResults: params.toolResults,
+          step: params.step,
+        }),
+        ...(attachmentImages.length > 0 ? { image: attachmentImages } : {}),
+      },
         {
           providerName: activeProvider.name,
           apiKey: activeProvider.apiKey,
           baseUrl: activeProvider.baseUrl,
           chatProtocol: activeProvider.chatProtocol,
           reasoningProtocol: activeProvider.reasoningProtocol,
-          imageProtocol: activeProvider.imageProtocol
-        }
+          imageProtocol: activeProvider.imageProtocol,
+        },
+        { signal: controller.signal }
       );
-
-      const raw = String(response.output || '').trim();
-      let parsed: any = null;
-      try {
-        parsed = extractJsonObject(raw);
-      } catch {
-        appendMessage({ role: 'assistant', content: raw || '我没有拿到有效回复。' });
-        return;
+    } finally {
+      if (agentAbortControllerRef.current === controller) {
+        agentAbortControllerRef.current = null;
       }
+    }
 
-      const canvasActions = normalizeCanvasActions(parsed);
-      const normalized = canvasActions.length > 0 ? [] : updateTasksFromParsed(parsed);
-      const reply = String(parsed?.reply || (canvasActions.length > 0 ? '我准备按你的要求操作画布。' : (normalized.length > 0 ? `我已经更新了 ${normalized.length} 个任务草案。` : '我看完了，需要你再补充一点信息。')));
-      appendMessage({ role: 'assistant', content: reply });
-
-      if (canvasActions.length > 0) {
-        const needsConfirmation = parsed?.needsConfirmation === true
-          || parsed?.needs_confirmation === true
-          || canvasActions.some((action) => action.requiresConfirmation)
-          || (
-            canvasActions.some((action) => action.type === 'run_all_image_nodes')
-            && !wantsRun(text)
-          )
-          || (
-            canvasActions.filter((action) => action.type === 'create_node').length > 3
-            && !wantsExpand(text)
-          );
-
-        if (needsConfirmation) {
-          setPendingCanvasActions(canvasActions);
-          setPendingCanvasActionReason(String(parsed?.reason || canvasActions.find((action) => action.reason)?.reason || '这个操作会影响多个画布元素。'));
-          appendMessage({ role: 'assistant', content: '我已经准备好画布动作。确认后回复“执行”，或点击下方确认按钮。' });
-        } else {
-          const result = await executeCanvasActions(canvasActions);
-          appendMessage({ role: 'assistant', content: result });
-        }
-        return;
-      }
-
-      const nextTasks = normalized.length > 0 ? normalized : tasks;
-      const modelValidation = parsed?.validation && typeof parsed.validation === 'object'
-        ? {
-          passed: parsed.validation.passed !== false,
-          errors: Array.isArray(parsed.validation.errors) ? parsed.validation.errors.map(String) : [],
-          warnings: Array.isArray(parsed.validation.warnings) ? parsed.validation.warnings.map(String) : []
-        } satisfies AgentValidation
-        : validateAgentTasks(nextTasks, referenceImages.length);
-      const localValidation = validateAgentTasks(nextTasks, referenceImages.length);
-      const mergedValidation: AgentValidation = {
-        passed: modelValidation.passed && localValidation.passed,
-        errors: [...modelValidation.errors, ...localValidation.errors],
-        warnings: [...modelValidation.warnings, ...localValidation.warnings]
+    const rawOutput = String(response.output || '').trim();
+    try {
+      return extractJsonObject(rawOutput);
+    } catch {
+      return {
+        reply: rawOutput || '模型没有返回有效内容。',
+        actions: [],
       };
-      setLastValidation(mergedValidation);
-      if (mergedValidation.warnings.length > 0) {
-        appendMessage({ role: 'assistant', content: `自检提醒：${mergedValidation.warnings.join('；')}` });
+    }
+  }, [activeProvider, attachments, canvasState, chatModelId]);
+
+  const runAgentLoop = useCallback(async (
+    userText: string,
+    conversation: AgentMessage[],
+    seedResults: CanvasToolResult[] = []
+  ) => {
+    let toolResults = [...seedResults];
+
+    for (let step = seedResults.length > 0 ? 2 : 1; step <= MAX_AGENT_STEPS; step += 1) {
+      if (stopRequestedRef.current) return;
+      const parsed = await callAgentModel({
+        userText,
+        conversation,
+        toolResults,
+        step,
+      });
+      const reply = String(parsed?.reply || '').trim();
+      const actions = normalizeCanvasActions(parsed);
+
+      if (stopRequestedRef.current) return;
+
+      if (reply) {
+        appendMessage({ role: 'assistant', content: reply });
       }
 
-      const toolCalls = normalizeToolCalls(parsed, text);
-      await handleToolCalls(toolCalls, nextTasks, text);
+      if (actions.length === 0) {
+        return;
+      }
+
+      if (shouldConfirmActions(actions, parsed, userText)) {
+        setPendingRequest({
+          actions,
+          reason: String(parsed?.reason || actions.find((action) => action.reason)?.reason || `将执行 ${actions.length} 个画布动作。`),
+          userText,
+          conversation,
+          previousResults: toolResults,
+        });
+        appendMessage({ role: 'assistant', content: '这些动作需要确认。回复“执行”或点击确认按钮后我再动手。' });
+        return;
+      }
+
+      const stepResults = await executeCanvasActions(actions);
+      if (stopRequestedRef.current) return;
+      toolResults = [...toolResults, ...stepResults];
+      appendMessage({
+        role: 'assistant',
+        content: summarizeToolResultsForUser(stepResults),
+      });
+    }
+
+    appendMessage({ role: 'assistant', content: '我已经完成最多 4 轮画布工具调用，先停在这里避免误操作。' });
+  }, [appendMessage, callAgentModel, executeCanvasActions, shouldConfirmActions]);
+
+  const confirmPendingActions = useCallback(async () => {
+    if (!pendingRequest || isThinking) return;
+    stopRequestedRef.current = false;
+    setIsThinking(true);
+    try {
+      const stepResults = await executeCanvasActions(pendingRequest.actions);
+      setPendingRequest(null);
+      appendMessage({
+        role: 'assistant',
+        content: summarizeToolResultsForUser(stepResults),
+      });
+      await runAgentLoop(
+        pendingRequest.userText,
+        pendingRequest.conversation,
+        [...pendingRequest.previousResults, ...stepResults]
+      );
     } catch (error: any) {
-      appendMessage({ role: 'assistant', content: `这次调用模型失败：${error?.message || error}` });
-      pushNotice('error', '画布智能体调用失败');
+      if (stopRequestedRef.current) {
+        appendMessage({ role: 'assistant', content: '已暂停。' });
+      } else {
+        appendMessage({ role: 'assistant', content: `画布动作执行失败：${error?.message || error}` });
+        pushNotice('error', '画布动作执行失败');
+      }
+    } finally {
+      setIsThinking(false);
+    }
+  }, [appendMessage, executeCanvasActions, isThinking, pendingRequest, pushNotice, runAgentLoop]);
+
+  const sendMessage = useCallback(async (raw?: string) => {
+    const text = String(raw ?? input).trim();
+    if (!text || isThinking) return;
+
+    stopRequestedRef.current = false;
+    setInput('');
+    const userMessage = appendMessage({ role: 'user', content: text });
+    const conversation = [...messages, userMessage];
+    setIsThinking(true);
+
+    try {
+      if (pendingRequest && confirmsPendingAction(text)) {
+        const stepResults = await executeCanvasActions(pendingRequest.actions);
+        setPendingRequest(null);
+        appendMessage({
+          role: 'assistant',
+          content: summarizeToolResultsForUser(stepResults),
+        });
+        await runAgentLoop(
+          pendingRequest.userText,
+          pendingRequest.conversation,
+          [...pendingRequest.previousResults, ...stepResults]
+        );
+        return;
+      }
+
+      if (pendingRequest) {
+        setPendingRequest(null);
+      }
+
+      await runAgentLoop(text, conversation);
+    } catch (error: any) {
+      if (stopRequestedRef.current) {
+        appendMessage({ role: 'assistant', content: '已暂停。' });
+      } else {
+        appendMessage({ role: 'assistant', content: `画布智能体调用失败：${error?.message || error}` });
+        pushNotice('error', '画布智能体调用失败');
+      }
     } finally {
       setIsThinking(false);
     }
   }, [
-    activeProvider,
     appendMessage,
-    canvasSummary,
-    canvasStateForAgent,
-    chatInput,
-    chatModelId,
-    documentAssets,
     executeCanvasActions,
-    handleToolCalls,
+    input,
+    isThinking,
     messages,
-    normalizeToolCalls,
-    pendingCanvasActions,
+    pendingRequest,
     pushNotice,
-    referenceImages,
-    requirementText,
-    tasks,
-    updateTasksFromParsed
+    runAgentLoop,
   ]);
 
-  const updateTask = useCallback((index: number, patch: Partial<AgentTask>) => {
-    setTasks((prev) => prev.map((task, taskIndex) => taskIndex === index ? { ...task, ...patch } : task));
-    setBatchStatus('draft');
-    setCreatedWorkflow(null);
-      }, []);
-
-  const addManualTask = useCallback(() => {
-    setTasks((prev) => [
-      ...prev,
-      {
-        id: `item-${makeId()}`,
-        title: `任务 ${prev.length + 1}`,
-        prompt: '',
-        aspectRatio: '1:1',
-        imageSize: '1K',
-        imageUrls: [],
-        status: 'draft'
-      }
-    ]);
-    setBatchStatus('draft');
-    setActivePanel('tasks');
-    setCreatedWorkflow(null);
-      }, []);
-
-  const removeTask = useCallback((index: number) => {
-    const target = tasks[index];
-    const targetId = target?.id || `item-${index + 1}`;
-    setTasks((prev) => prev.filter((_, taskIndex) => taskIndex !== index));
-    setDocumentAssets((prev) => prev.map((asset) => ({
-      ...asset,
-      images: asset.images.map((image) => ({
-        ...image,
-        assignedTaskIds: image.assignedTaskIds.filter((itemId) => itemId !== targetId)
-      }))
-    })));
-    setBatchStatus('draft');
-    setCreatedWorkflow(null);
-      }, [tasks]);
-
-  const duplicateTask = useCallback((index: number) => {
-    const sourceTask = tasks[index];
-    if (!sourceTask) return;
-    const newTask: AgentTask = {
-      ...sourceTask,
-      id: `item-${makeId()}`,
-      title: `${sourceTask.title} (副本)`,
-      status: 'draft',
-      nodeId: undefined
-    };
-    setTasks((prev) => {
-      const next = [...prev];
-      next.splice(index + 1, 0, newTask);
-      return next;
-    });
-    setBatchStatus('draft');
-    setCreatedWorkflow(null);
-    pushNotice('success', '已复制任务');
-  }, [pushNotice, tasks]);
-
-  const assignDocumentImageToTask = useCallback((assetId: string, imageId: string, taskIndex: number) => {
-    const asset = documentAssets.find((item) => item.id === assetId);
-    const image = asset?.images.find((item) => item.id === imageId);
-    const targetTask = tasks[taskIndex];
-    if (!asset || !image || !targetTask) return;
-
-    const targetTaskId = targetTask.id || `item-${taskIndex + 1}`;
-    setTasks((prev) => prev.map((task, index) => (
-      index === taskIndex
-        ? { ...task, id: targetTaskId, imageUrls: mergeUniqueImages(task.imageUrls, [image.src]) }
-        : task
-    )));
-    setDocumentAssets((prev) => prev.map((item) => (
-      item.id !== assetId
-        ? item
-        : {
-          ...item,
-          images: item.images.map((docImage) => (
-            docImage.id === imageId
-              ? { ...docImage, assignedTaskIds: Array.from(new Set([...docImage.assignedTaskIds, targetTaskId])) }
-              : docImage
-          ))
-        }
-    )));
-    setBatchStatus('draft');
-    setCreatedWorkflow(null);
-        pushNotice('success', `已把文档图 ${image.index} 绑定到任务 ${taskIndex + 1}`);
-  }, [documentAssets, pushNotice, tasks]);
+  const hasModelConfig = Boolean(activeProvider?.apiKey && activeProvider?.baseUrl && chatModelId);
+  const agentStatus = isThinking || isWorkflowRunning
+    ? '运行中'
+    : pendingRequest
+      ? '等待确认'
+      : hasModelConfig
+        ? '就绪'
+        : '待配置';
+  const agentStatusClass = isThinking || isWorkflowRunning
+    ? 'border-cyan-400/25 bg-cyan-400/10 text-cyan-100'
+    : pendingRequest
+      ? 'border-amber-400/25 bg-amber-400/10 text-amber-100'
+      : hasModelConfig
+        ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+        : 'border-rose-400/25 bg-rose-400/10 text-rose-100';
+  const selectedFacts = selectedNode
+    ? [
+      selectedNode.data.config?.modelId || '未设模型',
+      selectedNode.data.config?.aspectRatio || '未设比例',
+      selectedNode.data.config?.imageSize || '未设尺寸',
+    ]
+    : ['未选中节点'];
+  const quickPrompts = [
+    selectedNode ? '解释当前选中节点和它的上下游' : '解释当前画布结构',
+    selectedNode ? '把选中节点改成 46:19、2K、中等质量' : '创建一个新的图像生成节点',
+    attachments.length > 0 ? '先读取附件并整理可执行任务' : '搭一个表格批量生图流程',
+  ];
+  const showQuickPrompts = messages.length <= 1 && !pendingRequest && !isThinking;
 
   if (!isOpen) return null;
 
-  const tabButtonClass = (tab: AgentPanelTab) => (
-    `flex-1 rounded-2xl px-3 py-2 text-[11px] font-black transition ${
-      activePanel === tab
-        ? 'bg-cyan-400 text-black shadow-[0_0_24px_rgba(34,211,238,0.22)]'
-        : 'border border-white/10 bg-white/[0.04] text-gray-400 hover:border-cyan-400/30 hover:text-cyan-100'
-    }`
-  );
-
   return (
-    <aside className="absolute right-4 top-20 bottom-20 z-30 flex w-[540px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-[28px] border border-cyan-500/20 bg-[#071018]/95 shadow-[0_24px_80px_rgba(0,0,0,0.55)] backdrop-blur-xl">
-      <div className="flex items-center justify-between border-b border-white/10 bg-gradient-to-r from-cyan-500/10 via-blue-500/5 to-transparent px-5 py-4">
-        <div className="flex items-center gap-3">
-          <div className="rounded-2xl bg-cyan-500/15 p-2.5 text-cyan-300">
-            <Bot size={20} />
+    <aside className="absolute right-4 top-16 bottom-16 z-30 flex w-[540px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0b0f14]/95 shadow-[0_24px_90px_rgba(0,0,0,0.6)] backdrop-blur-xl">
+      <div className="flex items-center justify-between border-b border-white/10 bg-white/[0.03] px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-cyan-200">
+            <Bot size={17} />
           </div>
-          <div>
-            <h2 className="text-sm font-black tracking-widest text-white">画布智能体</h2>
-            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-300/70">
-              对话模型：{chatModelId || '未选择'}
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h2 className="truncate text-[13px] font-semibold text-gray-100">画布智能体</h2>
+              <span className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold ${agentStatusClass}`}>
+                {agentStatus}
+              </span>
+            </div>
+            <p className="mt-0.5 truncate text-[10px] text-gray-500">
+              {selectedNode ? selectedNode.data.label : '当前没有选中节点'}
             </p>
-            <p className="mt-1 text-[9px] font-bold text-gray-500">
-              {batchId ? `批次：${batchId}` : '批次：尚未保存'}
-              {isBatchSaving ? ' · 保存中' : (lastSavedAt ? ` · 已保存 ${new Date(lastSavedAt).toLocaleTimeString()}` : '')}
-            </p>
-            {!chatModelId && !isThinking && (
-              <div className="mt-1.5 flex items-center gap-1.5 rounded-lg border border-amber-400/20 bg-amber-400/10 px-2 py-1">
-                <span className="text-[9px] font-bold text-amber-200">⚠ 未选对话模型</span>
-                <span className="text-[9px] text-amber-200/70">请先在模型枢纽选择</span>
-              </div>
-            )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={toggleHistory}
-            className={`rounded-xl p-2 transition ${activePanel === 'history' ? 'bg-cyan-400/15 text-cyan-200' : 'text-gray-500 hover:bg-white/10 hover:text-white'}`}
-            title="批次历史"
-          >
-            <History size={18} />
-          </button>
-          <button onClick={onClose} className="rounded-xl p-2 text-gray-500 transition hover:bg-white/10 hover:text-white">
-            <X size={18} />
-          </button>
-        </div>
-      </div>
-
-      <div className="border-b border-white/10 bg-black/20 px-5 py-4">
-        <div className="mb-3 grid grid-cols-3 gap-2">
-          <button type="button" onClick={() => setActivePanel('chat')} className={tabButtonClass('chat')}>
-            沟通需求
-          </button>
-          <button type="button" onClick={() => setActivePanel('tasks')} className={tabButtonClass('tasks')}>
-            任务草稿 {readyTaskCount > 0 ? readyTaskCount : ''}
-          </button>
+        <div className="flex items-center gap-1">
+          {messages.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setMessages((prev) => prev.slice(0, 1))}
+              className="rounded-lg p-2 text-gray-500 transition hover:bg-white/10 hover:text-gray-200"
+              title="清空对话"
+            >
+              <Trash2 size={15} />
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => {
-              setActivePanel('history');
-              setIsHistoryOpen(true);
-              void loadBatchHistory();
-            }}
-            className={tabButtonClass('history')}
+            onClick={onClose}
+            className="rounded-lg p-2 text-gray-500 transition hover:bg-white/10 hover:text-gray-200"
+            title="关闭"
           >
-            批次历史
+            <X size={16} />
           </button>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2">
-            <p className="text-[9px] font-black uppercase tracking-widest text-gray-500">任务</p>
-            <p className="mt-1 text-sm font-black text-white">{readyTaskCount}/{tasks.length}</p>
-            <p className="mt-0.5 text-[9px] text-gray-600">{promptCharCount > 0 ? `${promptCharCount} 字提示词` : '等待草稿'}</p>
-          </div>
-          <div className="rounded-2xl border border-orange-400/15 bg-orange-400/[0.045] px-3 py-2">
-            <p className="text-[9px] font-black uppercase tracking-widest text-orange-200/60">产品图绑定</p>
-            <p className="mt-1 text-sm font-black text-orange-100">{imageBoundTaskCount}/{readyTaskCount || 0}</p>
-            <p className="mt-0.5 text-[9px] text-orange-100/45">{referenceImages.length + documentImageCount} 张素材</p>
-          </div>
-          <div className={`rounded-2xl border px-3 py-2 ${lastValidation.errors.length > 0 ? 'border-rose-400/20 bg-rose-400/[0.06]' : 'border-emerald-400/15 bg-emerald-400/[0.04]'}`}>
-            <p className={`text-[9px] font-black uppercase tracking-widest ${lastValidation.errors.length > 0 ? 'text-rose-200/70' : 'text-emerald-200/60'}`}>自检</p>
-            <p className={`mt-1 text-sm font-black ${lastValidation.errors.length > 0 ? 'text-rose-100' : 'text-emerald-100'}`}>
-              {lastValidation.errors.length > 0 ? `${lastValidation.errors.length} 错误` : '可执行'}
-            </p>
-            {lastValidation.errors.length > 0 && (
-              <div className="mt-1.5 space-y-0.5">
-                {lastValidation.errors.slice(0, 3).map((error, i) => (
-                  <p key={i} className="text-[9px] text-rose-300/80 leading-tight">
-                    {error.length > 40 ? error.slice(0, 40) + '...' : error}
-                  </p>
-                ))}
-                {lastValidation.errors.length > 3 && (
-                  <p className="text-[9px] text-rose-400/70">+{lastValidation.errors.length - 3} 项</p>
-                )}
-              </div>
-            )}
-            {lastValidation.warnings.length > 0 && lastValidation.errors.length === 0 && (
-              <div className="mt-1.5">
-                <p className="text-[9px] text-amber-300/70">{lastValidation.warnings.length} 项提醒</p>
-              </div>
-            )}
-          </div>
         </div>
       </div>
 
-      <div className="custom-scrollbar flex-1 space-y-4 overflow-y-auto p-5">
-        {activePanel === 'history' && (
-          <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/[0.05] p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-black text-cyan-100">批次历史</p>
-                <p className="mt-1 text-[10px] text-cyan-200/60">恢复之前的任务草稿、状态和结果记录</p>
+      <div className="border-b border-white/10 px-4 py-2.5">
+        <div className="flex items-center gap-2 overflow-hidden">
+          <span className="shrink-0 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-semibold text-gray-300">
+            {selectedNode ? selectedNode.data.type : 'NO SELECTION'}
+          </span>
+          {selectedFacts.map((fact, index) => (
+            <span key={`${fact}-${index}`} className="min-w-0 truncate rounded-md bg-white/[0.035] px-2 py-1 text-[10px] text-gray-500">
+              {fact}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 scrollbar-hide">
+        {!hasModelConfig && (
+          <div className="mb-4 flex gap-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.08] p-3 text-[11px] leading-relaxed text-amber-100">
+            <AlertCircle size={15} className="mt-0.5 shrink-0" />
+            <span>缺少对话模型或 API 配置。配置好后，智能体才能把自然语言转成画布工具调用。</span>
+          </div>
+        )}
+
+        <div className="space-y-5">
+          {messages.map((message) => {
+            const isUser = message.role === 'user';
+            return (
+              <article key={message.id} className="flex gap-3">
+                <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${
+                  isUser
+                    ? 'border-cyan-300/20 bg-cyan-300/10 text-cyan-100'
+                    : 'border-white/10 bg-white/[0.04] text-gray-300'
+                }`}>
+                  {isUser ? <MessageSquare size={14} /> : <Bot size={14} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-[11px] font-semibold text-gray-200">{isUser ? '你' : 'Canvas Agent'}</span>
+                    {!isUser && <span className="text-[9px] text-gray-600">workspace</span>}
+                  </div>
+                  <div className={`rounded-lg border px-3.5 py-3 ${
+                    isUser
+                      ? 'border-cyan-300/15 bg-cyan-300/[0.08]'
+                      : 'border-white/10 bg-white/[0.035]'
+                  }`}>
+                    {renderMessage(message.content)}
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+
+          {pendingRequest && (
+            <section className="ml-10 rounded-lg border border-amber-400/25 bg-amber-400/[0.07] p-3.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Check size={14} className="text-amber-200" />
+                    <p className="text-[12px] font-semibold text-amber-100">等待你确认</p>
+                  </div>
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-gray-300">
+                    {pendingRequest.reason || `将执行 ${pendingRequest.actions.length} 个画布动作。`}
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-md bg-black/20 px-2 py-1 text-[9px] font-semibold text-amber-100">
+                  {pendingRequest.actions.length} actions
+                </span>
               </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="file"
-                  accept=".json"
-                  className="hidden"
-                  id="conversation-import-input"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = (e) => {
-                      try {
-                        const text = e.target?.result as string;
-                        const parsed = JSON.parse(text);
-                        if (Array.isArray(parsed)) {
-                          const validMessages = parsed.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({
-                            id: m.id || makeId(),
-                            role: m.role,
-                            content: String(m.content || '')
-                          }));
-                          if (validMessages.length > 0) {
-                            setMessages(validMessages);
-                            pushNotice('success', `已导入 ${validMessages.length} 条对话`);
-                          } else {
-                            pushNotice('error', '导入失败：无效对话格式');
-                          }
-                        } else if (parsed?.messages && Array.isArray(parsed.messages)) {
-                          const validMessages = parsed.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({
-                            id: m.id || makeId(),
-                            role: m.role,
-                            content: String(m.content || '')
-                          }));
-                          if (validMessages.length > 0) {
-                            setMessages(validMessages);
-                            pushNotice('success', `已导入 ${validMessages.length} 条对话`);
-                          } else {
-                            pushNotice('error', '导入失败：无效对话格式');
-                          }
-                        } else {
-                          pushNotice('error', '导入失败：无效文件格式');
-                        }
-                      } catch {
-                        pushNotice('error', '导入失败：文件解析错误');
-                      }
-                    };
-                    reader.readAsText(file);
-                    event.currentTarget.value = '';
-                  }}
-                />
-                <label
-                  htmlFor="conversation-import-input"
-                  className="cursor-pointer rounded-xl border border-cyan-300/20 bg-black/20 px-2.5 py-2 text-[10px] font-black text-cyan-100 transition hover:bg-cyan-300/10"
-                >
-                  导入对话
-                </label>
-                <button
-                  onClick={() => void loadBatchHistory()}
-                  disabled={isHistoryLoading}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-300/20 bg-black/20 px-2.5 py-2 text-[10px] font-black text-cyan-100 transition hover:bg-cyan-300/10 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <RefreshCw size={12} className={isHistoryLoading ? 'animate-spin' : ''} />
-                  刷新
-                </button>
-              </div>
-            </div>
-            {historyError && (
-              <p className="mb-3 rounded-xl border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-[11px] text-rose-100">
-                {historyError}
-              </p>
-            )}
-            {isHistoryLoading && batchHistory.length === 0 ? (
-              <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-gray-400">
-                <Loader2 size={13} className="animate-spin text-cyan-200" />
-                正在读取历史批次...
-              </div>
-            ) : batchHistory.length === 0 ? (
-              <p className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[11px] text-gray-400">
-                暂时还没有保存过的智能体批次。
-              </p>
-            ) : (
-              <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
-                {batchHistory.map((item) => {
-                  const counts = formatStatusCounts(item.statusCounts);
-                  const isCurrent = item.id === batchId;
-                  const isLoadingThis = loadingBatchId === item.id;
-                  const isDeletingThis = deletingBatchId === item.id;
+              <div className="mt-3 space-y-1.5">
+                {pendingRequest.actions.map((action, index) => {
+                  const Icon = actionIcon(action.type);
                   return (
-                    <div
-                      key={item.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => {
-                        if (!loadingBatchId && !deletingBatchId) void loadHistoryBatch(item.id);
-                      }}
-                      onKeyDown={(event) => {
-                        if ((event.key === 'Enter' || event.key === ' ') && !loadingBatchId && !deletingBatchId) {
-                          event.preventDefault();
-                          void loadHistoryBatch(item.id);
-                        }
-                      }}
-                      aria-disabled={!!loadingBatchId || !!deletingBatchId}
-                      className={`w-full cursor-pointer rounded-2xl border p-3 text-left transition hover:border-cyan-300/40 hover:bg-cyan-300/[0.06] ${
-                        (loadingBatchId || deletingBatchId) ? 'pointer-events-none opacity-60' : ''
-                      } ${
-                        isCurrent ? 'border-cyan-300/40 bg-cyan-300/[0.08]' : 'border-white/10 bg-black/20'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="truncate text-[11px] font-black text-white">
-                            {item.name || item.summary || item.id}
-                          </p>
-                          <p className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-gray-400">
-                            {item.summary || '没有摘要'}
-                          </p>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          <span className={`rounded-full border px-2 py-1 text-[9px] font-black ${getBatchStatusClass(item.status)}`}>
-                            {isLoadingThis ? '加载中' : isDeletingThis ? '删除中' : getBatchStatusLabel(item.status)}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void deleteHistoryBatch(item.id);
-                            }}
-                            disabled={!!loadingBatchId || !!deletingBatchId}
-                            className="pointer-events-auto rounded-lg p-1.5 text-gray-500 transition hover:bg-rose-400/10 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-40"
-                            title="删除历史批次"
-                          >
-                            {isDeletingThis ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                          </button>
-                        </div>
-                      </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-2 text-[9px] font-bold text-gray-500">
-                        <span>{item.itemCount || 0} 个任务</span>
-                        {counts && <span>{counts}</span>}
-                        {item.imageModelId && <span>图像模型 {item.imageModelId}</span>}
-                        {item.referenceImageCount ? <span>参考图 {item.referenceImageCount}</span> : null}
-                      </div>
-                      <p className="mt-2 text-[9px] text-gray-600">
-                        更新于 {formatBatchTime(item.updatedAt)}
-                      </p>
+                    <div key={`${action.type}-${index}`} className="flex items-center gap-2 rounded-md border border-white/10 bg-black/20 px-2.5 py-2 text-[10px] text-gray-200">
+                      <Icon size={13} className="shrink-0 text-amber-200" />
+                      <span className="min-w-0 truncate">{summarizeAction(action)}</span>
                     </div>
                   );
                 })}
               </div>
-            )}
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void confirmPendingActions()}
+                  disabled={isThinking}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-amber-300 px-3 py-2 text-[11px] font-semibold text-black transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Check size={13} />
+                  确认执行
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPendingRequest(null)}
+                  disabled={isThinking}
+                  className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold text-gray-300 transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  取消
+                </button>
+              </div>
+            </section>
+          )}
+
+          {isThinking && (
+            <div className="ml-10 rounded-lg border border-cyan-400/20 bg-cyan-400/[0.06] px-3.5 py-3">
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-cyan-100">
+                <Loader2 size={14} className="animate-spin" />
+                正在推理并调用画布工具
+              </div>
+              <div className="mt-2 space-y-1">
+                {['理解指令', '检查画布状态', '准备工具动作'].map((label, index) => (
+                  <div key={label} className="flex items-center gap-2 text-[10px] text-gray-500">
+                    <Wrench size={11} className={index === 0 ? 'text-cyan-300' : 'text-gray-600'} />
+                    <span>{label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div ref={messagesEndRef} />
+      </div>
+
+      <div className="border-t border-white/10 bg-[#070a0f]/95 p-3.5">
+        {showQuickPrompts && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {quickPrompts.map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                onClick={() => void sendMessage(prompt)}
+                disabled={isThinking}
+                className="rounded-md border border-white/10 bg-white/[0.035] px-2.5 py-1.5 text-[10px] text-gray-300 transition hover:border-cyan-300/30 hover:bg-cyan-300/[0.06] hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {prompt}
+              </button>
+            ))}
           </div>
         )}
 
-        {activePanel === 'chat' && (
-          <div className="flex flex-col min-h-0 flex-1">
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1 custom-scrollbar">
-            {messages.map((message) => (
+        {attachments.length > 0 && (
+          <div className="mb-2 flex max-h-20 flex-wrap gap-1.5 overflow-y-auto pr-1">
+            {attachments.map((attachment) => (
               <div
-                key={message.id}
-                className={`rounded-2xl border px-4 py-3 text-xs leading-relaxed ${
-                  message.role === 'user'
-                    ? 'ml-8 border-cyan-400/20 bg-cyan-400/10 text-cyan-50'
-                    : 'mr-8 border-white/10 bg-white/[0.04] text-gray-200'
-                }`}
+                key={attachment.id}
+                className="flex max-w-full items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5 text-[10px] text-gray-300"
+                title={attachment.name}
               >
-                {renderFormattedMessage(message.content)}
+                {attachment.kind === 'xlsx' ? <FileText size={12} className="shrink-0 text-emerald-300" /> : <FileUp size={12} className="shrink-0 text-cyan-300" />}
+                <span className="shrink-0 text-gray-500">{getAttachmentKindLabel(attachment.kind)}</span>
+                <span className="max-w-[230px] truncate">{attachment.name}</span>
+                <span className="shrink-0 text-gray-600">{formatFileSize(attachment.size)}</span>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(attachment.id)}
+                  className="shrink-0 rounded p-0.5 text-gray-500 transition hover:bg-white/10 hover:text-rose-300"
+                  title="移除附件"
+                >
+                  <X size={11} />
+                </button>
               </div>
             ))}
-            {isThinking && (
-              <div className="mr-8 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-xs text-gray-400">
-                <Loader2 size={14} className="animate-spin text-cyan-300" />
-                正在调用当前对话模型思考...
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
           </div>
         )}
 
-        {activePanel === 'tasks' && tasks.length > 0 && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-black text-white">任务草稿</p>
-                <p className="mt-1 text-[10px] text-gray-500">可直接编辑，修改后点击空白处保存</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="file"
-                  accept=".json"
-                  className="hidden"
-                  id="task-import-input"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = (e) => {
-                      try {
-                        const text = e.target?.result as string;
-                        const parsed = JSON.parse(text);
-                        let importedTasks: AgentTask[] = [];
-                        if (Array.isArray(parsed)) {
-                          importedTasks = parsed.map(normalizeTask).filter((t): t is AgentTask => !!t);
-                        } else if (parsed?.tasks && Array.isArray(parsed.tasks)) {
-                          importedTasks = parsed.tasks.map(normalizeTask).filter((t): t is AgentTask => !!t);
-                        }
-                        if (importedTasks.length > 0) {
-                          setTasks((prev) => [...prev, ...importedTasks]);
-                          setBatchStatus('draft');
-                          setCreatedWorkflow(null);
-                          pushNotice('success', `已导入 ${importedTasks.length} 个任务`);
-                        } else {
-                          pushNotice('error', '导入失败：无法解析任务数据');
-                        }
-                      } catch {
-                        pushNotice('error', '导入失败：文件格式错误');
-                      }
-                    };
-                    reader.readAsText(file);
-                    event.currentTarget.value = '';
-                  }}
-                />
-                <label
-                  htmlFor="task-import-input"
-                  className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] font-bold text-gray-300 transition hover:border-cyan-400/40 hover:text-cyan-200"
-                >
-                  导入 JSON
-                </label>
-                <button
-                  type="button"
-                  onClick={addManualTask}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-400 px-3 py-2 text-[11px] font-black text-black transition hover:bg-cyan-300"
-                >
-                  <PlusCircle size={13} />
-                  新建
-                </button>
-                <button
-                  onClick={() => {
-                    const data = JSON.stringify(tasks, null, 2);
-                    const blob = new Blob([data], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `tasks-${Date.now()}.json`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                    pushNotice('success', '已导出任务 JSON');
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] font-bold text-gray-300 transition hover:border-cyan-400/40 hover:text-cyan-200"
-                >
-                  导出 JSON
-                </button>
-              </div>
-            </div>
-            <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
-              {tasks.map((task, index) => (
-                <div
-                  key={task.id || index}
-                  draggable
-                  onDragStart={(e) => {
-                    setDragSourceIndex(index);
-                    e.dataTransfer.effectAllowed = 'move';
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = 'move';
-                    setDragOverIndex(index);
-                  }}
-                  onDragEnd={() => {
-                    if (dragSourceIndex !== null && dragSourceIndex !== index) {
-                      setTasks((prev) => {
-                        const next = [...prev];
-                        const [removed] = next.splice(dragSourceIndex, 1);
-                        next.splice(index, 0, removed);
-                        return next;
-                      });
-                      setBatchStatus('draft');
-                      setCreatedWorkflow(null);
-                      pushNotice('success', '任务已重新排序');
-                    }
-                    setDragSourceIndex(null);
-                    setDragOverIndex(null);
-                  }}
-                  className={`rounded-2xl border bg-white/[0.04] p-3 transition hover:border-cyan-400/30 ${
-                    dragOverIndex === index ? 'border-cyan-400/60 scale-[1.02]' : 'border-white/10'
-                  }`}
-                >
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-5 w-5 cursor-grab items-center justify-center rounded bg-cyan-400/20 text-[10px] font-black text-cyan-200" title="拖拽排序">
-                        {index + 1}
-                      </span>
-                      <input
-                        type="text"
-                        value={task.title}
-                        onChange={(e) => updateTask(index, { title: e.target.value })}
-                        onBlur={() => setBatchStatus('draft')}
-                        className="w-32 rounded-lg border border-transparent bg-black/20 px-2 py-1 text-[11px] font-black text-white outline-none transition focus:border-cyan-400/40"
-                        placeholder="任务标题"
-                      />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={task.aspectRatio || '1:1'}
-                        onChange={(e) => updateTask(index, {
-                          aspectRatio: e.target.value,
-                          ...(isGptImage2ImageModel && e.target.value === '46:19' && !['2K', '4K'].includes(task.imageSize || '')
-                            ? { imageSize: '2K' }
-                            : {}),
-                        })}
-                        onBlur={() => setBatchStatus('draft')}
-                        className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-gray-300 outline-none"
-                      >
-                        <option value="1:1">1:1</option>
-                        <option value="4:3">4:3</option>
-                        <option value="3:4">3:4</option>
-                        <option value="16:9">16:9</option>
-                        <option value="9:16">9:16</option>
-                        <option value="3:2">3:2</option>
-                        <option value="2:3">2:3</option>
-                        {isGptImage2ImageModel && <option value="46:19">46:19</option>}
-                      </select>
-                      <select
-                        value={getTaskImageSizeValue(task)}
-                        onChange={(e) => updateTask(index, { imageSize: e.target.value })}
-                        onBlur={() => setBatchStatus('draft')}
-                        className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-gray-300 outline-none"
-                      >
-                        {!(isGptImage2ImageModel && task.aspectRatio === '46:19') && <option value="1K">1K</option>}
-                        <option value="2K">2K</option>
-                        <option value="4K">4K</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => duplicateTask(index)}
-                        className="rounded-lg p-1.5 text-gray-500 transition hover:bg-cyan-400/10 hover:text-cyan-300"
-                        title="复制任务"
-                      >
-                        <Copy size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeTask(index)}
-                        className="rounded-lg p-1.5 text-gray-500 transition hover:bg-rose-400/10 hover:text-rose-300"
-                        title="删除任务"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    value={task.prompt}
-                    onChange={(e) => updateTask(index, { prompt: e.target.value })}
-                    onBlur={() => setBatchStatus('draft')}
-                    placeholder="输入提示词..."
-                    className="w-full resize-none rounded-xl border border-white/10 bg-black/30 p-2 text-[10px] leading-relaxed text-gray-200 outline-none transition focus:border-cyan-400/40"
-                    rows={3}
-                  />
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[9px]">
-                    <span className={`rounded-full border px-2 py-1 font-black ${getTaskStatusClass(task.status)}`}>
-                      {getTaskStatusLabel(task.status)}
-                    </span>
-                    <span className="rounded-full border border-white/10 bg-black/20 px-2 py-1 text-gray-400">
-                      {task.prompt.trim().length || 0} 字
-                    </span>
-                    <span className="rounded-full border border-orange-300/15 bg-orange-300/[0.06] px-2 py-1 text-orange-100/80">
-                      图片 {(task.imageUrls || []).length}
-                    </span>
-                    {(task.imageRefs || []).length > 0 && (
-                      <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.06] px-2 py-1 text-cyan-100/80">
-                        引用 {(task.imageRefs || []).length}
-                      </span>
-                    )}
-                  </div>
-                  {(task.imageUrls || []).length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {task.imageUrls!.map((_url, imgIdx) => (
-                        <span key={imgIdx} className="inline-flex items-center gap-1 rounded bg-orange-400/20 px-1.5 py-0.5 text-[9px] text-orange-200">
-                          图{imgIdx + 1}
-                          <button
-                            type="button"
-                            onClick={() => updateTask(index, { imageUrls: task.imageUrls!.filter((_, i) => i !== imgIdx) })}
-                            className="text-orange-400/60 hover:text-orange-200"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {task.error && (
-                    <div className="mt-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setExpandedTaskErrors((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(index)) {
-                              next.delete(index);
-                            } else {
-                              next.add(index);
-                            }
-                            return next;
-                          });
-                        }}
-                        className="flex items-center gap-1 text-[9px] text-rose-300 hover:text-rose-200"
-                      >
-                        <span className={`transition-transform ${expandedTaskErrors.has(index) ? 'rotate-90' : ''}`}>▶</span>
-                        {expandedTaskErrors.has(index) ? '收起详情' : '查看错误详情'}
-                      </button>
-                      {expandedTaskErrors.has(index) && (
-                        <p className="mt-1.5 rounded-lg border border-rose-400/20 bg-rose-400/10 p-2 text-[9px] leading-relaxed text-rose-200">
-                          {task.error}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {activePanel === 'tasks' && tasks.length === 0 && (
-          <div className="rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.045] to-white/[0.015] p-5">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-cyan-400/10">
-              <Sparkles size={28} className="text-cyan-300" />
-            </div>
-            <div className="text-center">
-              <p className="text-sm font-black text-white">从需求到批量出图，只差任务草稿</p>
-              <p className="mt-2 text-[11px] leading-relaxed text-gray-500">
-                先上传文件或贴需求，再让智能体拆任务；也可以手动创建空白任务。
-              </p>
-            </div>
-            <div className="mt-4 grid grid-cols-3 gap-2">
-              {['上传需求', '生成草稿', '展开/跑图'].map((item, index) => (
-                <div key={item} className="rounded-xl border border-white/10 bg-black/20 px-2.5 py-2 text-center">
-                  <p className="text-[9px] font-black text-cyan-200">0{index + 1}</p>
-                  <p className="mt-1 text-[10px] font-bold text-gray-300">{item}</p>
-                </div>
-              ))}
-            </div>
-            <div className="mt-4 flex flex-wrap justify-center gap-2">
-              <button
-                onClick={() => requirementFileRef.current?.click()}
-                className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-[10px] font-bold text-cyan-200 transition hover:bg-cyan-400/20"
-              >
-                上传需求文件
-              </button>
-              <button
-                onClick={() => imageFileRef.current?.click()}
-                className="rounded-xl border border-orange-400/30 bg-orange-400/10 px-3 py-2 text-[10px] font-bold text-orange-200 transition hover:bg-orange-400/20"
-              >
-                上传参考图
-              </button>
-              <button
-                onClick={addManualTask}
-                className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-[10px] font-bold text-gray-400 transition hover:border-white/40 hover:text-gray-300"
-              >
-                创建空白任务
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <label className="text-xs font-bold text-gray-300">需求材料</label>
-            <span className="shrink-0 rounded-full border border-white/10 bg-black/20 px-2 py-1 text-[9px] font-bold text-gray-500">
-              {requirementText.trim().length} 字 · {referenceImages.length} 参考图 · {documentImageCount} 文档图
-            </span>
-          </div>
-          <textarea
-            value={requirementText}
-            onChange={(event) => setRequirementText(event.target.value)}
-            placeholder="粘贴客户需求、表格字段、产品信息、批量规则；也可以上传 docx/xlsx/csv/txt。"
-            className="h-28 w-full resize-none rounded-2xl border border-white/10 bg-black/30 p-3 text-xs leading-relaxed text-gray-200 outline-none transition focus:border-cyan-400/60"
-          />
-          <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[10px] font-bold text-gray-400">快速添加任务（每行一个任务，提示词自动取整行文本）</span>
-              <button
-                type="button"
-                onClick={() => {
-                  const input = window.prompt('粘贴任务列表（每行一个任务）：');
-                  if (!input?.trim()) return;
-                  const newTasks = buildFallbackTasks(input);
-                  if (newTasks.length > 0) {
-                    setTasks((prev) => [...prev, ...newTasks]);
-                    setBatchStatus('draft');
-                    setCreatedWorkflow(null);
-                    pushNotice('success', `已添加 ${newTasks.length} 个任务`);
-                  }
-                }}
-                className="rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-2.5 py-1.5 text-[10px] font-bold text-cyan-200 transition hover:bg-cyan-400/20"
-              >
-                按行导入
-              </button>
-            </div>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <input
-              ref={requirementFileRef}
-              type="file"
-              accept=".txt,.md,.csv,.xlsx,.xls,.docx,.doc,.pdf"
-              className="hidden"
-              onChange={(event) => {
-                void handleRequirementFile(event.target.files?.[0]);
-                event.currentTarget.value = '';
-              }}
-            />
-            <input
-              ref={imageFileRef}
-              type="file"
-              accept="image/*"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                void handleImageFiles(event.target.files);
-                event.currentTarget.value = '';
-              }}
-            />
-            <button
-              onClick={() => requirementFileRef.current?.click()}
-              className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] font-bold text-gray-300 transition hover:border-cyan-400/40 hover:text-cyan-200"
-            >
-              <FilePlus2 size={14} />
-              上传需求文件
-            </button>
-            <button
-              onClick={() => imageFileRef.current?.click()}
-              className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] font-bold text-gray-300 transition hover:border-orange-400/40 hover:text-orange-200"
-            >
-              <ImagePlus size={14} />
-              参考图 {referenceImages.length > 0 ? referenceImages.length : ''}
-            </button>
-            <button
-              onClick={() => void sendAgentMessage('请分析当前需求材料，和我沟通缺失信息；如果信息足够，就生成批量出图任务计划。')}
-              disabled={isThinking}
-              className="ml-auto inline-flex items-center gap-2 rounded-xl bg-cyan-500 px-3 py-2 text-[11px] font-black text-black transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isThinking ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-              {hasRequirementMaterial ? '分析并拆任务' : '让智能体追问'}
-            </button>
-          </div>
-          {documentAssets.length > 0 && (
-            <div className="mt-3 rounded-2xl border border-cyan-400/15 bg-cyan-400/[0.04] p-3">
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <div>
-                  <p className="text-[10px] font-black text-cyan-100">文档图片素材</p>
-                  <p className="mt-1 text-[9px] text-cyan-200/60">
-                    共 {documentAssets.length} 份文档，{documentImageCount} 张图片，可点击查看或绑定到任务
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setActivePanel('tasks')}
-                  className="rounded-xl border border-cyan-300/20 bg-black/20 px-2.5 py-2 text-[10px] font-black text-cyan-100 transition hover:bg-cyan-300/10"
-                >
-                  去任务区
-                </button>
-              </div>
-              <div className="space-y-3">
-                {documentAssets.map((asset) => (
-                  <div key={asset.id} className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                    <div className="mb-2 flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-[11px] font-black text-white">{asset.fileName}</p>
-                        {asset.textPreview && (
-                          <p className="mt-1 line-clamp-2 text-[9px] leading-relaxed text-gray-500">
-                            {asset.textPreview}
-                          </p>
-                        )}
-                      </div>
-                      <span className="shrink-0 rounded-full bg-cyan-400/10 px-2 py-1 text-[9px] font-black text-cyan-100">
-                        {asset.images.length} 图
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-4 gap-2">
-                      {asset.images.slice(0, 16).map((image) => (
-                        <div key={image.id} className="group relative overflow-hidden rounded-xl border border-white/10 bg-black/40">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if ((window as any).openLightbox) {
-                                (window as any).openLightbox(image.src);
-                              }
-                            }}
-                            className="block aspect-square w-full overflow-hidden"
-                            title={`${asset.fileName} - 图片 ${image.index}`}
-                          >
-                            <img src={image.src} alt={`${asset.fileName} 图片 ${image.index}`} className="h-full w-full object-cover transition group-hover:scale-110" />
-                          </button>
-                          <div className="absolute left-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[8px] font-black text-white/80">
-                            #{image.index}
-                          </div>
-                          {image.assignedTaskIds.length > 0 && (
-                            <div className="absolute right-1 top-1 rounded bg-emerald-400/90 px-1.5 py-0.5 text-[8px] font-black text-black">
-                              已绑定
-                            </div>
-                          )}
-                          {tasks.length > 0 && (
-                            <div className="absolute inset-x-1 bottom-1 opacity-0 transition group-hover:opacity-100">
-                              <select
-                                value=""
-                                onChange={(event) => {
-                                  const nextIndex = Number(event.target.value);
-                                  if (Number.isFinite(nextIndex)) {
-                                    assignDocumentImageToTask(asset.id, image.id, nextIndex);
-                                  }
-                                  event.currentTarget.value = '';
-                                }}
-                                className="w-full rounded-lg border border-cyan-300/20 bg-black/85 px-1.5 py-1 text-[9px] font-bold text-cyan-50 outline-none"
-                              >
-                                <option value="" disabled>绑定到任务</option>
-                                {tasks.map((task, taskIndex) => (
-                                  <option key={`${task.id || taskIndex}-${taskIndex}`} value={taskIndex}>
-                                    {taskIndex + 1}. {task.title || `任务 ${taskIndex + 1}`}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {referenceImages.length > 0 && (
-            <div className="mt-3 rounded-2xl border border-orange-400/15 bg-orange-400/[0.04] p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-[10px] font-black text-orange-200">会发送给对话模型的参考图</span>
-                <span className="text-[10px] text-orange-200/70">
-                  {referenceImages.length} 张，单次最多传前 12 张
-                </span>
-              </div>
-              <div className="grid grid-cols-6 gap-2">
-                {referenceImages.slice(0, 12).map((src, index) => (
-                  <div
-                    key={`${src.slice(0, 32)}-${index}`}
-                    className="group relative overflow-hidden rounded-xl border border-white/10 bg-black/40"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if ((window as any).openLightbox) {
-                          (window as any).openLightbox(src);
-                        }
-                      }}
-                      className="block aspect-square w-full"
-                      title={`参考图 ${index + 1}`}
-                    >
-                      <img src={src} alt={`参考图 ${index + 1}`} className="h-full w-full object-cover transition group-hover:scale-110" />
-                    </button>
-                    <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 text-[8px] font-bold text-white/80">
-                      {index + 1}
-                    </span>
-                    {tasks.length > 0 && (
-                      <div className="absolute inset-x-1 bottom-1 opacity-0 transition group-hover:opacity-100">
-                        <select
-                          value=""
-                          onChange={(event) => {
-                            const nextIndex = Number(event.target.value);
-                            if (Number.isFinite(nextIndex)) {
-                              const targetTask = tasks[nextIndex];
-                              if (targetTask) {
-                                setTasks((prev) => prev.map((task, taskIdx) => (
-                                  taskIdx === nextIndex
-                                    ? { ...task, imageUrls: mergeUniqueImages(task.imageUrls, [src]) }
-                                    : task
-                                )));
-                              }
-                            }
-                            event.currentTarget.value = '';
-                          }}
-                          className="w-full rounded-lg border border-cyan-300/20 bg-black/85 px-1.5 py-1 text-[9px] font-bold text-cyan-50 outline-none"
-                        >
-                          <option value="" disabled>绑定到任务</option>
-                          {tasks.map((task, taskIndex) => (
-                            <option key={`ref-${task.id || taskIndex}-${taskIndex}`} value={taskIndex}>
-                              {taskIndex + 1}. {task.title || `任务 ${taskIndex + 1}`}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-        </div>
-        )}
-      </div>
-
-      <div className="border-t border-white/10 bg-black/25 p-4">
-        {activePanel === 'chat' && (
-        <div className="mb-3 flex gap-2">
+        <div className="rounded-xl border border-white/10 bg-white/[0.035] p-2 shadow-[0_12px_40px_rgba(0,0,0,0.22)] focus-within:border-cyan-300/35">
           <input
-            value={chatInput}
-            onChange={(event) => setChatInput(event.target.value)}
+            ref={attachmentInputRef}
+            type="file"
+            multiple
+            onChange={(event) => void handleAttachmentChange(event)}
+            className="hidden"
+          />
+          <textarea
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            onPaste={handleComposerPaste}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
-                void sendAgentMessage();
-              } else if (event.key === 'Escape') {
+                void sendMessage();
+              }
+              if (event.key === 'Escape') {
                 event.preventDefault();
-                setChatInput('');
-              } else if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                void sendAgentMessage();
+                setInput('');
               }
             }}
-            placeholder="直接说画布动作：比如“把选中图像节点改成 46:19、2K、中等质量并运行”"
-            className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-xs text-gray-200 outline-none transition focus:border-cyan-400/60"
+            rows={2}
+            placeholder="让智能体读取、改画布、连节点或运行流程..."
+            className="max-h-32 min-h-14 w-full resize-none bg-transparent px-2 py-1.5 text-[12px] leading-relaxed text-gray-100 outline-none placeholder:text-gray-600"
           />
-          {messages.length > 1 && (
-            <button
-              onClick={() => {
-                setMessages([defaultWelcomeMessage]);
-              }}
-              className="rounded-2xl border border-white/10 bg-black/20 px-3 text-gray-500 transition hover:border-rose-400/40 hover:text-rose-300"
-              title="清空对话"
-            >
-              <Trash2 size={14} />
-            </button>
-          )}
-          <button
-            onClick={() => void sendAgentMessage()}
-            disabled={isThinking || !chatInput.trim()}
-            className="rounded-2xl bg-cyan-500 px-4 text-black transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Send size={16} />
-          </button>
-        </div>
-        )}
-        {confirmAction && (
-          <div className="mb-3 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 p-4">
-            <p className="text-xs font-black text-cyan-100">
-              {confirmAction === 'expand' ? '确认展开到画布' : '确认批量跑图'}
-            </p>
-            <p className="mt-1.5 text-[10px] text-gray-300">
-              将处理 <span className="font-black text-cyan-200">{readyTaskCount}</span> 个任务
-              {referenceImages.length > 0 && `，附带 ${referenceImages.length} 张参考图`}
-              {failedTaskCount > 0 && `（另含 ${failedTaskCount} 个失败任务）`}
-            </p>
-            <div className="mt-3 flex gap-2">
+          <div className="flex items-center justify-between gap-2 border-t border-white/5 pt-2">
+            <div className="flex items-center gap-1">
               <button
                 type="button"
-                onClick={() => {
-                  if (confirmAction === 'expand') {
-                    void expandToCanvas();
-                  } else {
-                    void runCreatedWorkflow();
-                  }
-                  setConfirmAction(null);
-                }}
-                className="rounded-xl bg-cyan-500 px-4 py-2 text-[11px] font-black text-black transition hover:bg-cyan-400"
+                onClick={() => attachmentInputRef.current?.click()}
+                disabled={isThinking || isReadingFiles}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-white/10 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+                title="添加附件"
               >
-                确认执行
+                {isReadingFiles ? <Loader2 size={15} className="animate-spin" /> : <Paperclip size={15} />}
               </button>
-              <button
-                type="button"
-                onClick={() => setConfirmAction(null)}
-                className="rounded-xl border border-white/10 bg-black/20 px-4 py-2 text-[11px] font-bold text-gray-300 transition hover:border-white/30"
-              >
-                取消
-              </button>
+              <span className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-gray-500">
+                {nodes.length} 节点 · {edges.length} 连线
+              </span>
             </div>
-          </div>
-        )}
-        {pendingCanvasActions.length > 0 && (
-          <div className="mb-3 rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-4">
-            <p className="text-xs font-black text-emerald-100">确认画布动作</p>
-            <p className="mt-1.5 text-[10px] leading-relaxed text-gray-300">
-              {pendingCanvasActionReason || `将执行 ${pendingCanvasActions.length} 个画布动作。`}
-            </p>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {pendingCanvasActions.slice(0, 6).map((action, index) => (
-                <span key={`${action.type}-${index}`} className="rounded-lg border border-emerald-300/20 bg-black/20 px-2 py-1 text-[9px] font-bold text-emerald-100">
-                  {action.type}
-                </span>
-              ))}
-            </div>
-            <div className="mt-3 flex gap-2">
-              <button
-                type="button"
-                onClick={async () => {
-                  const result = await executeCanvasActions(pendingCanvasActions);
-                  setPendingCanvasActions([]);
-                  setPendingCanvasActionReason('');
-                  appendMessage({ role: 'assistant', content: result });
-                }}
-                className="rounded-xl bg-emerald-400 px-4 py-2 text-[11px] font-black text-black transition hover:bg-emerald-300"
-              >
-                确认执行
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingCanvasActions([]);
-                  setPendingCanvasActionReason('');
-                }}
-                className="rounded-xl border border-white/10 bg-black/20 px-4 py-2 text-[11px] font-bold text-gray-300 transition hover:border-white/30"
-              >
-                取消
-              </button>
-            </div>
-          </div>
-        )}
-        {activePanel !== 'history' && (
-          readyTaskCount === 0 ? (
-            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/[0.06] p-3">
-              <button
-                type="button"
-                onClick={() => void sendAgentMessage('请根据当前需求材料和参考图生成一版可编辑的批量出图任务草稿。')}
-                disabled={isThinking}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-xs font-black text-black transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isThinking ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-                先生成任务草稿
-              </button>
-              <p className="mt-2 text-center text-[10px] leading-relaxed text-cyan-100/65">
-                有任务草稿后，才能展开到画布或批量跑图。
-              </p>
-            </div>
-          ) : (
-            <div className={`grid gap-3 ${failedTaskCount > 0 ? 'grid-cols-3' : 'grid-cols-2'}`}>
-              <button
-                onClick={() => setConfirmAction('expand')}
-                disabled={isExpanding}
-                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-cyan-400/25 bg-cyan-400/10 px-4 py-3 text-xs font-black text-cyan-200 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isExpanding ? <Loader2 size={15} className="animate-spin" /> : <PlusCircle size={15} />}
-                {isExpanding ? '展开中...' : '展开到画布'}
-              </button>
-              <button
-                onClick={() => setConfirmAction('run')}
-                disabled={isRunning}
-                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white px-4 py-3 text-xs font-black text-black transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isRunning ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}
-                {isRunning ? '运行中...' : '批量跑图'}
-              </button>
-              {failedTaskCount > 0 && (
+            <div className="flex items-center gap-1.5">
+              {(isThinking || isWorkflowRunning) && (
                 <button
-                  onClick={() => void executeToolCall('retry_failed', tasks)}
-                  disabled={isRunning}
-                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-xs font-black text-rose-100 transition hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  type="button"
+                  onClick={() => pauseAll(true)}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md bg-rose-500 px-3 text-[11px] font-semibold text-white transition hover:bg-rose-400"
+                  title="暂停"
                 >
-                  重试失败 {failedTaskCount}
+                  <Square size={13} />
+                  停止
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => void sendMessage()}
+                disabled={isThinking || isWorkflowRunning || !input.trim()}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-cyan-300 px-3 text-[11px] font-semibold text-black transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-45"
+                title="发送"
+              >
+                <Send size={13} />
+                发送
+                <CornerDownLeft size={12} className="opacity-60" />
+              </button>
             </div>
-          )
-        )}
-        {activePanel === 'history' && (
-          <button
-            onClick={() => void loadBatchHistory()}
-            disabled={isHistoryLoading}
-            className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-cyan-400/25 bg-cyan-400/10 px-4 py-3 text-xs font-black text-cyan-100 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <RefreshCw size={15} className={isHistoryLoading ? 'animate-spin' : ''} />
-            刷新批次历史
-          </button>
-        )}
+          </div>
+        </div>
       </div>
-    </div>
     </aside>
   );
 };
