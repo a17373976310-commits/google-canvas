@@ -36,13 +36,13 @@ export const QuickNodeMenu: React.FC<QuickNodeMenuProps> = ({ isOpen, x, y, onCl
     <>
       <div className="absolute inset-0 z-40" onClick={onClose} />
       <div
-        className="absolute z-50 w-[320px] md:w-[360px] rounded-2xl border border-[#2a2a3a] bg-[#0d0d13]/97 shadow-[0_24px_80px_rgba(0,0,0,0.65)] backdrop-blur-xl"
+        className="canvas-quick-node-menu absolute z-50 w-[320px] md:w-[360px] rounded-2xl border theme-border-medium theme-bg-overlay shadow-[0_24px_80px_rgba(0,0,0,0.65)] backdrop-blur-xl"
         style={{ left: x, top: y }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="p-3 border-b border-[#1e1e2d]">
-          <div className="flex items-center gap-2 rounded-xl border border-[#2a2a3a] bg-black/40 px-3 py-2">
-            <Search size={14} className="text-gray-500" />
+        <div className="p-3 border-b theme-border-subtle">
+          <div className="canvas-quick-search flex items-center gap-2 rounded-xl border theme-border-medium bg-black/40 px-3 py-2">
+            <Search size={14} className="theme-text-muted" />
             <input
               ref={inputRef}
               value={query}
@@ -66,15 +66,15 @@ export const QuickNodeMenu: React.FC<QuickNodeMenuProps> = ({ isOpen, x, y, onCl
                 }
               }}
               placeholder="输入节点名，回车创建"
-              className="w-full bg-transparent border-none outline-none text-xs text-gray-300 placeholder:text-gray-700"
+              className="w-full bg-transparent border-none outline-none text-xs theme-text-primary theme-placeholder-muted"
             />
           </div>
-          <p className="text-[9px] text-gray-600 mt-2">双击/右键画布可快速调出，回车即可创建节点</p>
+          <p className="text-[9px] theme-text-muted mt-2">双击/右键画布可快速调出，回车即可创建节点</p>
         </div>
 
         <div className="max-h-[340px] overflow-y-auto custom-scrollbar p-2 space-y-1.5">
           {list.length === 0 && (
-            <div className="py-8 text-center text-gray-700 text-xs">没有匹配节点</div>
+            <div className="py-8 text-center theme-text-disabled text-xs">没有匹配节点</div>
           )}
           {list.map((item, index) => {
             const Icon = item.icon;
@@ -87,14 +87,14 @@ export const QuickNodeMenu: React.FC<QuickNodeMenuProps> = ({ isOpen, x, y, onCl
                   onPick(item.type);
                   onClose();
                 }}
-                className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all flex items-center gap-3 ${isActive ? 'bg-indigo-500/12 border-indigo-500/30' : 'bg-[#11111a] border-[#1e1e2d] hover:border-[#2f2f46]'}`}
+                className={`canvas-quick-node-item w-full text-left px-3 py-2.5 rounded-xl border transition-all flex items-center gap-3 ${isActive ? 'bg-indigo-500/12 border-indigo-500/30' : 'theme-bg-secondary theme-border-subtle hover:theme-border-medium'}`}
               >
                 <div className={`p-2 rounded-lg bg-black/40 ${item.color}`}>
                   <Icon size={13} />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-[11px] font-bold text-gray-200 truncate">{item.label}</p>
-                  <p className="text-[9px] text-gray-600 truncate">{item.keywords.join(' / ')}</p>
+                  <p className="text-[11px] font-bold theme-text-primary truncate">{item.label}</p>
+                  <p className="text-[9px] theme-text-muted truncate">{item.keywords.join(' / ')}</p>
                 </div>
               </button>
             );

@@ -6,8 +6,10 @@ color 0B
 cd /d "%~dp0"
 set "ROOT=%CD%"
 set "BACKEND_DIR=%ROOT%\backend"
-set "FRONTEND_URL=http://127.0.0.1:3000"
+set "FRONTEND_PORT=5173"
+set "FRONTEND_URL=http://127.0.0.1:%FRONTEND_PORT%"
 set "BACKEND_URL=http://127.0.0.1:8000/health"
+set "STARTUP_TIMEOUT_SECONDS=60"
 
 echo ==========================================
 echo    AI Infinite Canvas - One Click Start
@@ -27,8 +29,8 @@ if not exist "%BACKEND_DIR%\main.py" (
   exit /b 1
 )
 
-echo [1/5] Clearing ports 3000 and 8000...
-for %%P in (3000 8000) do (
+echo [1/5] Clearing ports 3000, %FRONTEND_PORT% and 8000...
+for %%P in (3000 %FRONTEND_PORT% 8000) do (
   for /f "tokens=5" %%I in ('netstat -ano ^| findstr :%%P ^| findstr LISTENING') do (
     taskkill /PID %%I /F >nul 2>nul
   )
@@ -71,14 +73,25 @@ if errorlevel 1 (
 
 echo [5/5] Starting backend and frontend...
 start "AI Canvas Backend" cmd /k "cd /d ""%BACKEND_DIR%"" && python main.py"
-start "AI Canvas Frontend" cmd /k "cd /d ""%ROOT%"" && npm run dev -- --host 127.0.0.1 --port 3000"
+start "AI Canvas Frontend" cmd /k "cd /d ""%ROOT%"" && npm run dev -- --host 127.0.0.1 --port %FRONTEND_PORT%"
 
 echo.
 echo Backend:  %BACKEND_URL%
 echo Frontend: %FRONTEND_URL%
 echo.
+
+echo Waiting for frontend to become available...
+call :wait_url "%FRONTEND_URL%" %STARTUP_TIMEOUT_SECONDS%
+if errorlevel 1 (
+  echo [WARN] Frontend did not respond within %STARTUP_TIMEOUT_SECONDS% seconds.
+  echo Keep the server windows open, then open this URL manually when ready:
+  echo %FRONTEND_URL%
+  pause
+  exit /b 1
+)
+
+echo Frontend is ready. Opening browser...
 start "" "%FRONTEND_URL%"
-echo If the page opens too early, wait a few seconds and refresh.
 pause
 exit /b 0
 
@@ -90,3 +103,19 @@ if errorlevel 1 (
   exit /b 1
 )
 exit /b 0
+
+:wait_url
+set "WAIT_URL=%~1"
+set /a "WAIT_TIMEOUT=%~2"
+if %WAIT_TIMEOUT% LEQ 0 set "WAIT_TIMEOUT=60"
+
+for /l %%S in (1,1,%WAIT_TIMEOUT%) do (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -Uri '%WAIT_URL%' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) { exit 0 } } catch { }; exit 1" >nul 2>nul
+  if not errorlevel 1 (
+    exit /b 0
+  )
+  <nul set /p="."
+  timeout /t 1 /nobreak >nul
+)
+echo.
+exit /b 1

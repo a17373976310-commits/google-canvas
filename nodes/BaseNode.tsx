@@ -1,19 +1,22 @@
-
 import React from 'react';
-import { useStore } from '../store';
-import { NodeData, NODE_MODALITIES, NodeType, NODE_CAPABILITIES, NodeCapability } from '../types';
+import { createPortal } from 'react-dom';
+import { Handle, NodeResizer, Position, useStoreApi, useUpdateNodeInternals } from 'reactflow';
+import { useShallow } from 'zustand/react/shallow';
 import {
-  CheckCircle,
   AlertCircle,
-  Loader2,
-  Trash2,
+  CheckCircle,
   GripHorizontal,
+  Loader2,
   Lock,
-  Unlock,
+  MoreHorizontal,
   Play,
-  SkipForward
+  SkipForward,
+  Trash2,
+  Unlock,
 } from 'lucide-react';
-import { NodeResizer, useUpdateNodeInternals } from 'reactflow';
+import { getNodeSpec, NodeHandleSpec } from '../config/nodeSpecs';
+import { useStore } from '../store';
+import { NodeCapability, NODE_CAPABILITIES, NODE_MODALITIES, NodeData, NodeType } from '../types';
 
 interface BaseNodeProps {
   children: React.ReactNode;
@@ -24,89 +27,251 @@ interface BaseNodeProps {
   selected?: boolean;
 }
 
-import { useShallow } from 'zustand/react/shallow';
+type PortStyle = React.CSSProperties & Record<'--port-color' | '--port-muted' | '--port-text', string>;
+
+const positionMap: Record<NodeHandleSpec['side'], Position> = {
+  left: Position.Left,
+  right: Position.Right,
+  top: Position.Top,
+  bottom: Position.Bottom,
+};
+
+const getHandleOffset = (index: number, count: number) => {
+  if (count <= 1) return 50;
+  return ((index + 1) / (count + 1)) * 100;
+};
+
+const getPortStyle = (
+  handle: NodeHandleSpec,
+  offset: number
+): PortStyle => {
+  const style: PortStyle = {
+    '--port-color': `var(--node-${handle.color}-solid)`,
+    '--port-muted': `var(--node-${handle.color}-muted)`,
+    '--port-text': `var(--node-${handle.color}-text)`,
+  };
+
+  if (handle.side === 'left' || handle.side === 'right') {
+    style.top = `${offset}%`;
+  } else {
+    style.left = `${offset}%`;
+  }
+
+  return style;
+};
+
+const isMatchingHandle = (edgeHandle: string | null | undefined, specHandle: string | undefined) => {
+  return (edgeHandle || null) === (specHandle || null);
+};
 
 const ModelSelector = ({ nodeId, type, currentModel }: { nodeId: string; type: NodeType; currentModel?: string }) => {
   const [isOpen, setIsOpen] = React.useState(false);
-  const getModels = useStore(useShallow(state => state.getModelsForNode));
-  const updateNodeData = useStore(useShallow(state => state.updateNodeData));
+  const [query, setQuery] = React.useState('');
+  const [dropdownStyle, setDropdownStyle] = React.useState<React.CSSProperties>({});
+  const buttonRef = React.useRef<HTMLButtonElement | null>(null);
+  const getModels = useStore(useShallow((state) => state.getModelsForNode));
+  const updateNodeData = useStore(useShallow((state) => state.updateNodeData));
   const models = getModels(type);
+  const filteredModels = React.useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return models;
+    return models.filter((model) => model.toLowerCase().includes(normalizedQuery));
+  }, [models, query]);
+  const capabilityLabel = type === NodeType.AI_IMAGE
+    ? '图像'
+    : type === NodeType.AI_AUDIO
+      ? '音频'
+      : type === NodeType.AI_VIDEO
+      ? '视频'
+      : '文本';
+
+  const updateDropdownPosition = React.useCallback(() => {
+    const button = buttonRef.current;
+    if (!button) return;
+
+    const rect = button.getBoundingClientRect();
+    const dropdownWidth = Math.min(280, window.innerWidth - 24);
+    const left = Math.min(
+      Math.max(12, rect.left),
+      Math.max(12, window.innerWidth - dropdownWidth - 12)
+    );
+    const preferredTop = rect.bottom + 8;
+    const opensUp = preferredTop + 306 > window.innerHeight && rect.top > 320;
+
+    setDropdownStyle({
+      left,
+      top: opensUp ? undefined : preferredTop,
+      bottom: opensUp ? Math.max(12, window.innerHeight - rect.top + 8) : undefined,
+      width: dropdownWidth,
+    });
+  }, []);
+
+  React.useLayoutEffect(() => {
+    if (!isOpen) return undefined;
+
+    updateDropdownPosition();
+    window.addEventListener('resize', updateDropdownPosition);
+    window.addEventListener('scroll', updateDropdownPosition, true);
+
+    return () => {
+      window.removeEventListener('resize', updateDropdownPosition);
+      window.removeEventListener('scroll', updateDropdownPosition, true);
+    };
+  }, [isOpen, updateDropdownPosition]);
+
+  React.useEffect(() => {
+    if (!isOpen) return undefined;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+        setQuery('');
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen]);
 
   if (models.length === 0) return null;
 
   return (
-    <div className="relative">
+    <div className="canvas-model-selector relative min-w-0">
       <button
-        onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }}
-        className="flex items-center gap-2 px-3 py-1 bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/50 rounded-full transition-all group/model"
+        ref={buttonRef}
+        type="button"
+        data-node-interactive="true"
+        onPointerDown={(event) => event.stopPropagation()}
+        onPointerUp={(event) => {
+          event.stopPropagation();
+          setIsOpen((open) => !open);
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+        className="canvas-model-chip"
+        title={currentModel || '选择模型'}
       >
-        <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-        <span className="text-[9px] font-black text-indigo-300 uppercase tracking-widest">{currentModel || '点击选择模型'}</span>
+        <span className="canvas-model-dot" />
+        <span>{currentModel || '选择模型'}</span>
       </button>
 
-      {isOpen && (
+      {isOpen && createPortal(
         <>
-          <div className="fixed inset-0 z-[60]" onClick={() => setIsOpen(false)} />
-          <div className="absolute top-full right-0 mt-2 w-48 bg-[#0b0b0f] border border-[#2a2a3a] rounded-xl shadow-2xl z-[70] overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
-            <div className="px-3 py-2 border-b border-[#2a2a3a] bg-white/[0.02]">
-              <span className="text-[9px] font-black text-gray-500 uppercase tracking-[0.2em]">可用模型清单</span>
+          <div
+            className="canvas-model-dropdown-scrim nodrag nopan"
+            onClick={() => {
+              setIsOpen(false);
+              setQuery('');
+            }}
+          />
+          <div
+            className="canvas-model-dropdown nodrag nopan"
+            style={dropdownStyle}
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="canvas-model-dropdown-header">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-semibold theme-text-muted">可用模型</span>
+                <span className="canvas-model-capability">{capabilityLabel}</span>
+              </div>
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onPointerDown={(event) => event.stopPropagation()}
+                placeholder="搜索模型..."
+                className="canvas-model-search"
+              />
             </div>
-            <div className="max-h-60 overflow-y-auto py-1 scrollbar-hide">
-              {models.map(m => (
+            <div className="canvas-model-option-list custom-scrollbar">
+              {filteredModels.map((model) => (
                 <button
-                  key={m}
-                  className={`w-full px-4 py-2.5 text-left text-[11px] font-bold transition-all hover:bg-indigo-500/10 ${m === currentModel ? 'text-indigo-400 bg-indigo-500/5' : 'text-gray-400 hover:text-white'}`}
-                  onClick={() => {
-                    updateNodeData(nodeId, { config: { modelId: m } });
+                  key={model}
+                  type="button"
+                  className={`canvas-model-option ${model === currentModel ? 'is-selected' : ''}`}
+                  title={model}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    updateNodeData(nodeId, { config: { modelId: model } });
                     setIsOpen(false);
+                    setQuery('');
                   }}
                 >
-                  {m}
+                  <span>{model}</span>
                 </button>
               ))}
+              {filteredModels.length === 0 && (
+                <div className="canvas-model-empty">没有匹配的模型</div>
+              )}
             </div>
           </div>
-        </>
+        </>,
+        document.body
       )}
     </div>
   );
 };
 
 export const BaseNode: React.FC<BaseNodeProps> = ({ children, data, id, icon: Icon, color, selected }) => {
-  const { onNodesChange, updateNodeData, executeSingleNode, draggedModel, setDraggedModel, isDevMode, unlockedNodeIds } = useStore(useShallow((state) => ({
+  const {
+    onNodesChange,
+    onSelectionChange,
+    updateNodeData,
+    executeSingleNode,
+    draggedModel,
+    setDraggedModel,
+    isDevMode,
+    unlockedNodeIds,
+    edges,
+    selectedNodeId,
+  } = useStore(useShallow((state) => ({
     onNodesChange: state.onNodesChange,
+    onSelectionChange: state.onSelectionChange,
     updateNodeData: state.updateNodeData,
     executeSingleNode: state.executeSingleNode,
     draggedModel: state.draggedModel,
     setDraggedModel: state.setDraggedModel,
     isDevMode: state.isDevMode,
-    unlockedNodeIds: state.unlockedNodeIds
+    unlockedNodeIds: state.unlockedNodeIds,
+    edges: state.edges,
+    selectedNodeId: state.selectedNodeId,
   })));
+  const reactFlowStore = useStoreApi();
   const updateNodeInternals = useUpdateNodeInternals();
   const rootRef = React.useRef<HTMLDivElement | null>(null);
   const rafRef = React.useRef<number | null>(null);
+  const [isHoveredWithCompatible, setIsHoveredWithCompatible] = React.useState(false);
+  const [isActionMenuOpen, setIsActionMenuOpen] = React.useState(false);
+
+  const spec = React.useMemo(() => getNodeSpec(data.type), [data.type]);
+  const groupedHandles = React.useMemo(() => {
+    const groups = new Map<string, NodeHandleSpec[]>();
+    spec.handles.forEach((handle) => {
+      const key = `${handle.kind}-${handle.side}`;
+      groups.set(key, [...(groups.get(key) || []), handle]);
+    });
+    return groups;
+  }, [spec.handles]);
 
   const isLocked = data.security?.isLocked;
   const isAuthorized = isDevMode || unlockedNodeIds.has(id);
-
-  const handleDelete = () => onNodesChange([{ type: 'remove', id }]);
   const modality = NODE_MODALITIES[data.type];
   const capability = NODE_CAPABILITIES[data.type];
   const canRunIndividually = modality === 'ai'
     || data.type === NodeType.TABLE_PARSE
     || data.type === NodeType.TASK_SELECT
-    || data.type === NodeType.BATCH_EXECUTE;
-
-  // Neural Handshake Logic
+    || data.type === NodeType.BATCH_EXECUTE
+    || data.type === NodeType.STYLE_GUIDE;
+  const isAdjacent = !!selectedNodeId && selectedNodeId !== id && edges.some((edge) => (
+    (edge.source === selectedNodeId && edge.target === id)
+    || (edge.target === selectedNodeId && edge.source === id)
+  ));
   const isCompatible = draggedModel && draggedModel.capability === capability;
   const isMismatched = draggedModel && draggedModel.capability !== capability && capability !== NodeCapability.UTILITY;
-  const [isHoveredWithCompatible, setIsHoveredWithCompatible] = React.useState(false);
 
   const scheduleInternalsRefresh = React.useCallback(() => {
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-    }
-
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
       updateNodeInternals(id);
       rafRef.current = null;
@@ -124,186 +289,282 @@ export const BaseNode: React.FC<BaseNodeProps> = ({ children, data, id, icon: Ic
     data.isSkipped,
     data.output,
     data.inputs,
+    spec.handles,
   ]);
+
+  React.useLayoutEffect(() => {
+    const element = rootRef.current;
+    if (!element) return;
+    element
+      .querySelectorAll('input, textarea, select, button, a, [contenteditable="true"], [data-node-interactive="true"]')
+      .forEach((interactiveElement) => {
+        interactiveElement.classList.add('nodrag', 'nopan');
+      });
+  });
 
   React.useEffect(() => {
     const element = rootRef.current;
-    if (!element || typeof ResizeObserver === 'undefined') {
-      return undefined;
-    }
+    if (!element || typeof ResizeObserver === 'undefined') return undefined;
 
-    const observer = new ResizeObserver(() => {
-      scheduleInternalsRefresh();
-    });
+    const observer = new ResizeObserver(() => scheduleInternalsRefresh());
     observer.observe(element);
 
-    return () => {
-      observer.disconnect();
-    };
+    return () => observer.disconnect();
   }, [scheduleInternalsRefresh]);
 
   React.useEffect(() => {
     return () => {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-      }
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
 
-  const handleDrop = (e: React.DragEvent) => {
-    if (isCompatible && draggedModel) {
-      e.preventDefault();
-      updateNodeData(id, { config: { ...data.config, modelId: draggedModel.id } });
-      setIsHoveredWithCompatible(false);
-      setDraggedModel(null);
+  const selectNodeFromPointer = React.useCallback((event: React.PointerEvent) => {
+    if (event.button !== 0) return;
+    const state = reactFlowStore.getState();
+    if (state.nodeInternals.has(id)) {
+      state.addSelectedNodes([id]);
     }
+    onSelectionChange(id);
+  }, [id, onSelectionChange, reactFlowStore]);
+
+  const isEditingTarget = (target: HTMLElement | null) => {
+    if (!target) return false;
+    return !!target.closest('input, textarea, select, button, a, [contenteditable="true"], [data-node-interactive="true"]');
   };
 
-  const handleInteractivePointerCapture = (e: React.PointerEvent | React.MouseEvent) => {
-    const target = e.target as HTMLElement | null;
-    if (!target) return;
-
-    if (target.closest('input, textarea, select, button, label, [data-node-interactive="true"]')) {
-      e.stopPropagation();
+  const handlePointerDownCapture = (event: React.PointerEvent) => {
+    const target = event.target as HTMLElement | null;
+    if (isEditingTarget(target)) {
+      event.stopPropagation();
+      return;
     }
+    selectNodeFromPointer(event);
   };
+
+  const handleDrop = (event: React.DragEvent) => {
+    if (!isCompatible || !draggedModel) return;
+    event.preventDefault();
+    updateNodeData(id, { config: { ...data.config, modelId: draggedModel.id } });
+    setIsHoveredWithCompatible(false);
+    setDraggedModel(null);
+  };
+
+  const renderHandles = () => spec.handles.map((handle) => {
+    const key = `${handle.kind}-${handle.side}`;
+    const siblings = groupedHandles.get(key) || [];
+    const index = siblings.findIndex((item) => item === handle);
+    const offset = getHandleOffset(index, siblings.length);
+    const style = getPortStyle(handle, offset);
+    const connected = edges.some((edge) => handle.kind === 'source'
+      ? edge.source === id && isMatchingHandle(edge.sourceHandle, handle.id)
+      : edge.target === id && isMatchingHandle(edge.targetHandle, handle.id));
+
+    return (
+      <React.Fragment key={`${handle.kind}-${handle.id || 'default'}-${handle.side}`}>
+        <Handle
+          id={handle.id}
+          type={handle.kind}
+          position={positionMap[handle.side]}
+          className={`canvas-node-port canvas-node-port-${handle.kind} canvas-node-port-${handle.side}`}
+          data-connected={connected ? 'true' : 'false'}
+          data-port-color={handle.color}
+          style={style}
+        />
+        <div
+          className={`canvas-node-port-label canvas-node-port-label-${handle.side}`}
+          data-connected={connected ? 'true' : 'false'}
+          style={style}
+        >
+          {handle.label}
+        </div>
+      </React.Fragment>
+    );
+  });
+
+  const handleDelete = () => onNodesChange([{ type: 'remove', id }]);
+  const iconClassName = color.replace('bg-', 'text-');
 
   return (
     <div
       ref={rootRef}
-      onPointerDownCapture={handleInteractivePointerCapture}
-      onMouseDownCapture={handleInteractivePointerCapture}
-      onDragOver={(e) => {
-        if (isCompatible) {
-          e.preventDefault();
-          setIsHoveredWithCompatible(true);
-        }
+      data-node-id={id}
+      data-node-type={data.type}
+      data-node-status={data.status || 'idle'}
+      data-adjacent={isAdjacent ? 'true' : 'false'}
+      data-testid="canvas-node"
+      onPointerDownCapture={handlePointerDownCapture}
+      onDragOver={(event) => {
+        if (!isCompatible) return;
+        event.preventDefault();
+        setIsHoveredWithCompatible(true);
       }}
       onDragLeave={() => setIsHoveredWithCompatible(false)}
       onDrop={handleDrop}
-      className={`h-full min-w-[200px] relative group/node flex flex-col transition-all duration-300 ${isHoveredWithCompatible ? 'scale-105 z-[100]' :
+      className={`node-wrapper canvas-node relative flex h-full min-w-[220px] flex-col transition-all duration-150 ${isHoveredWithCompatible ? 'scale-[1.01] z-[100]' :
         isMismatched ? 'opacity-20 grayscale brightness-50' :
           data.isSkipped ? 'opacity-60 saturate-50' :
-            data.status === 'running' ? 'scale-[1.01]' : ''
+            data.status === 'running' ? 'scale-[1.005]' : ''
         }`}
     >
-      {/* Node Resizer - Outside Overflow Container to be visible */}
       <NodeResizer
         isVisible={selected}
-        minWidth={200}
-        minHeight={100}
+        minWidth={220}
+        minHeight={120}
         lineStyle={{ borderStyle: 'dashed', borderWidth: 1 }}
-        lineClassName="!border-indigo-500/30"
-        handleClassName="!h-2.5 !w-2.5 !bg-[#1a1a24] !border-[1.5px] !border-indigo-500 !rounded-full !shadow-[0_0_10px_rgba(99,102,241,0.5)] transition-transform hover:scale-125"
+        lineClassName="canvas-node-resizer-line"
+        handleClassName="canvas-node-resizer-handle !h-2 !w-2 theme-bg-node !border-[1.5px] !rounded-full transition-transform hover:scale-125"
       />
 
-      {/* Main Content Container - Handles Overflow & Styling */}
-      <div className={`absolute inset-0 flex flex-col overflow-visible rounded-2xl shadow-2xl bg-[#1a1a24] border-2 ${isHoveredWithCompatible ? 'border-green-500 ring-8 ring-green-500/20' :
-        isMismatched ? 'border-[#2a2a3a]' :
-          data.status === 'running' ? 'border-indigo-500 ring-4 ring-indigo-500/10' :
+      {renderHandles()}
+
+      <div className={`canvas-node-card absolute inset-0 flex flex-col overflow-hidden rounded-lg border theme-bg-node theme-shadow-node ${isHoveredWithCompatible ? 'border-green-500 ring-4 ring-green-500/15' :
+        isMismatched ? 'theme-border-node' :
+          data.status === 'running' ? 'border-indigo-500 ring-2 ring-indigo-500/10' :
             data.isSkipped ? 'border-amber-500/40 border-dashed' :
               data.status === 'success' ? 'border-emerald-500/30' :
-                data.status === 'error' ? 'border-rose-500/50' : 'border-[#2a2a3a]'
+                data.status === 'error' ? 'border-rose-500/50' : 'theme-border-node'
         }`}>
-
         {isHoveredWithCompatible && (
-          <div className="absolute inset-0 bg-green-500/10 pointer-events-none flex items-center justify-center z-[110] border-4 border-green-500 rounded-2xl">
-            <div className="bg-green-500 text-black px-4 py-2 rounded-full font-black text-[10px] uppercase tracking-[0.2em] shadow-2xl animate-bounce">
-              准备就绪 (可投放)
+          <div className="pointer-events-none absolute inset-0 z-[110] flex items-center justify-center rounded-lg border-2 border-green-500 bg-green-500/10">
+            <div className="rounded-md bg-green-500 px-3 py-1.5 text-[10px] font-semibold text-black shadow-2xl">
+              准备投放模型
             </div>
           </div>
         )}
 
-        {/* Running Glow Effect */}
         {data.status === 'running' && (
-          <div className="absolute top-0 left-0 w-full h-1 overflow-hidden z-20 rounded-t-2xl">
-            <div className="w-full h-full bg-indigo-500 animate-[loading_1.5s_infinite_linear]" />
+          <div className="absolute left-0 top-0 z-20 h-0.5 w-full overflow-hidden rounded-t-lg">
+            <div className="canvas-node-running-bar h-full w-full animate-[loading_1.5s_infinite_linear]" />
           </div>
         )}
 
-        {data.isSkipped && (
-          <div className="absolute top-0 left-0 z-20 px-2 py-0.5 rounded-br-lg bg-amber-500/20 border-r border-b border-amber-500/30">
-            <span className="text-[8px] font-black text-amber-300 uppercase tracking-widest">Skip</span>
-          </div>
-        )}
-
-        {data.status === 'running' && (data.type === NodeType.AI_IMAGE || data.type === NodeType.AI_VIDEO) && (
-          <div className="px-4 py-2 border-b border-indigo-500/15 bg-indigo-500/[0.04]">
-            <div className="flex items-center justify-between text-[9px] font-bold tracking-wider uppercase">
-              <span className="text-indigo-300">异步任务处理中</span>
-              <span className="text-indigo-200">{Math.max(1, Math.min(99, Math.floor(data.progress || 1)))}%</span>
+        <div className="canvas-node-toolbar">
+          <div className="canvas-node-identity canvas-node-drag-handle" title="拖动节点">
+            <div className={`canvas-node-icon ${color} flex items-center justify-center rounded-md bg-opacity-10 p-1.5`}>
+              {isLocked
+                ? (isAuthorized ? <Unlock size={12} className="text-orange-400" /> : <Lock size={12} className="text-rose-500" />)
+                : <Icon size={12} className={iconClassName} />}
             </div>
-            <div className="mt-1 h-1.5 rounded-full bg-[#0b0b0f] border border-indigo-500/20 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-cyan-400 to-indigo-500 transition-[width] duration-500"
-                style={{ width: `${Math.max(1, Math.min(99, Math.floor(data.progress || 1)))}%` }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Header */}
-        <div className={`px-4 py-2 flex items-center justify-between ${color} bg-opacity-[0.03] border-b border-[#2a2a3a]/50 backdrop-blur-md shrink-0 rounded-t-2xl`}>
-          <div className="flex items-center gap-2.5">
-            <div className={`p-1.5 rounded-lg ${color.replace('text-', 'bg-')} bg-opacity-10 shadow-inner flex items-center justify-center`}>
-              {isLocked ? (isAuthorized ? <Unlock size={12} className="text-orange-400" /> : <Lock size={12} className="text-rose-500" />) : <Icon size={12} className={color.replace('bg-', 'text-')} />}
-            </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-bold text-[11px] text-white/90 block leading-tight">{data.label}</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="canvas-node-title block truncate theme-text-primary">{data.label}</span>
                 {isLocked && (
-                  <div className={`px-1 py-0.5 rounded text-[6px] font-black uppercase tracking-tighter ${isAuthorized ? 'bg-orange-500/20 text-orange-400 border border-orange-500/20' : 'bg-rose-500/20 text-rose-500 border border-rose-500/20'}`}>
+                  <div className={`canvas-node-lock-badge ${isAuthorized ? 'border border-orange-500/20 bg-orange-500/20 text-orange-400' : 'border border-rose-500/20 bg-rose-500/20 text-rose-500'}`}>
                     Vault
                   </div>
                 )}
               </div>
-              <span className="font-medium text-[7px] text-gray-600 uppercase tracking-widest block leading-none mt-0.5 opacity-50">{modality === 'ai' ? 'AI 节点引擎' : '工作流工具插件'}</span>
             </div>
+            <GripHorizontal size={12} className="canvas-node-grip theme-text-muted" />
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* Single Node Execution Trigger - Only for AI Nodes */}
+          <div className="canvas-node-action-strip nodrag nopan">
             {canRunIndividually && (
               <button
-                onClick={(e) => { e.stopPropagation(); executeSingleNode(id); }}
+                type="button"
+                data-node-interactive="true"
+                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerUp={(event) => {
+                  event.stopPropagation();
+                  if (data.status !== 'running' && !data.isSkipped && !(isLocked && !isAuthorized)) {
+                    executeSingleNode(id);
+                  }
+                }}
+                onClick={(event) => event.stopPropagation()}
                 disabled={data.status === 'running' || !!data.isSkipped || (isLocked && !isAuthorized)}
-                className={`p-1.5 rounded-lg transition-all ${data.status === 'running' ? 'bg-indigo-500/10 text-indigo-400' : 'bg-indigo-500 hover:bg-indigo-400 text-white shadow-lg shadow-indigo-500/20 active:scale-90 disabled:opacity-30 disabled:grayscale disabled:pointer-events-none'}`}
+                className="canvas-node-action canvas-node-run-action"
                 title="独立运行此节点"
               >
                 <Play size={10} fill="currentColor" />
               </button>
             )}
 
-            <button
-              onClick={(e) => { e.stopPropagation(); updateNodeData(id, { isSkipped: !data.isSkipped, status: 'idle', error: undefined, progress: undefined }); }}
-              className={`p-1.5 rounded-lg transition-all ${data.isSkipped ? 'bg-amber-500/20 text-amber-300' : 'bg-white/5 text-gray-500 hover:text-amber-300 hover:bg-amber-500/10'}`}
-              title={data.isSkipped ? '恢复节点 (S)' : '跳过节点 (S)'}
-            >
-              <SkipForward size={10} />
-            </button>
-
-            {modality === 'ai' && <ModelSelector nodeId={id} type={data.type} currentModel={data.config.modelId} />}
             {data.status === 'running' && <Loader2 size={12} className="animate-spin text-indigo-400" />}
             {data.status === 'success' && <CheckCircle size={12} className="text-emerald-400" />}
             {data.status === 'error' && <AlertCircle size={12} className="text-rose-400" />}
-            <button
-              onClick={(e) => { e.stopPropagation(); handleDelete(); }}
-              className="p-1 rounded text-gray-600 hover:text-rose-400 hover:bg-rose-400/10 transition-all opacity-0 group-hover/node:opacity-100"
-            >
-              <Trash2 size={12} />
-            </button>
+
+            <div className="relative">
+              <button
+                type="button"
+                data-node-interactive="true"
+                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerUp={(event) => {
+                  event.stopPropagation();
+                  setIsActionMenuOpen((open) => !open);
+                }}
+                onClick={(event) => event.stopPropagation()}
+                className="canvas-node-action"
+                title="更多操作"
+              >
+                <MoreHorizontal size={12} />
+              </button>
+              {isActionMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-[60] nodrag nopan" onClick={() => setIsActionMenuOpen(false)} />
+                  <div className="canvas-node-action-menu absolute right-0 top-full z-[70] mt-2 overflow-hidden rounded-lg border theme-border-medium theme-bg-elevated theme-shadow-panel nodrag nopan">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        updateNodeData(id, { isSkipped: !data.isSkipped, status: 'idle', error: undefined, progress: undefined });
+                        setIsActionMenuOpen(false);
+                      }}
+                      className="canvas-node-menu-item"
+                    >
+                      <SkipForward size={13} />
+                      <span>{data.isSkipped ? '恢复节点' : '跳过节点'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleDelete();
+                        setIsActionMenuOpen(false);
+                      }}
+                      className="canvas-node-menu-item text-rose-400 hover:bg-rose-500/10"
+                    >
+                      <Trash2 size={13} />
+                      <span>删除节点</span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Content Area */}
-        <div className="nodrag nopan nowheel flex-1 flex flex-col relative overflow-hidden bg-[#0b0b0f]/50">
+        {modality === 'ai' && (
+          <div className="canvas-node-model-row nodrag nopan">
+            <span className="canvas-node-model-label">模型</span>
+            <ModelSelector nodeId={id} type={data.type} currentModel={data.config.modelId} />
+          </div>
+        )}
+
+        {data.status === 'running' && (data.type === NodeType.AI_IMAGE || data.type === NodeType.AI_VIDEO) && (
+          <div className="canvas-node-progress border-b px-4 py-2">
+            <div className="flex items-center justify-between text-[9px] font-bold">
+              <span>异步任务处理中</span>
+              <span>{Math.max(1, Math.min(99, Math.floor(data.progress || 1)))}%</span>
+            </div>
+            <div className="canvas-node-progress-track mt-1 h-1.5 overflow-hidden rounded-full border theme-bg-input">
+              <div
+                className="canvas-node-progress-fill h-full rounded-full transition-[width] duration-500"
+                style={{ width: `${Math.max(1, Math.min(99, Math.floor(data.progress || 1)))}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="canvas-node-body nowheel relative flex min-h-0 flex-1 flex-col overflow-hidden theme-bg-node-content">
           {children}
         </div>
 
-        {/* Error Message */}
         {data.error && (
-          <div className="px-5 py-3 bg-rose-500/5 text-rose-400 text-[10px] border-t border-rose-500/10 font-medium leading-relaxed italic shrink-0 break-all whitespace-pre-wrap max-h-24 overflow-y-auto">
-            错误：{data.error}
+          <div className="canvas-node-error">
+            <AlertCircle size={12} className="shrink-0" />
+            <span className="min-w-0 flex-1 break-all whitespace-pre-wrap">{data.error}</span>
           </div>
         )}
       </div>

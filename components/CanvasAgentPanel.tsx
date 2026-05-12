@@ -752,14 +752,14 @@ const renderMessage = (content: string) => (
       }
       if (/^[-•]\s+/.test(trimmed)) {
         return (
-          <div key={`${index}-${trimmed.slice(0, 12)}`} className="flex gap-1.5 text-[11px] leading-relaxed text-gray-300">
+          <div key={`${index}-${trimmed.slice(0, 12)}`} className="flex gap-1.5 text-[11px] leading-relaxed theme-text-primary">
             <ChevronRight size={12} className="mt-0.5 shrink-0 text-cyan-300/70" />
             <span className="min-w-0 break-words">{trimmed.replace(/^[-•]\s+/, '')}</span>
           </div>
         );
       }
       return (
-        <p key={`${index}-${trimmed.slice(0, 12)}`} className="break-words text-[11px] leading-relaxed text-gray-300">
+        <p key={`${index}-${trimmed.slice(0, 12)}`} className="break-words text-[11px] leading-relaxed theme-text-primary">
           {trimmed}
         </p>
       );
@@ -1844,20 +1844,20 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
   if (!isOpen) return null;
 
   return (
-    <aside className="absolute right-4 top-16 bottom-16 z-30 flex w-[540px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0b0f14]/95 shadow-[0_24px_90px_rgba(0,0,0,0.6)] backdrop-blur-xl">
-      <div className="flex items-center justify-between border-b border-white/10 bg-white/[0.03] px-4 py-3">
+    <aside className="absolute right-4 top-16 bottom-16 z-30 flex w-[540px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-xl border theme-border-subtle theme-bg-overlay theme-shadow-panel backdrop-blur-xl">
+      <div className="flex items-center justify-between border-b theme-border-subtle theme-bg-secondary px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-cyan-200">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border theme-border-subtle theme-bg-tertiary text-cyan-500">
             <Bot size={17} />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h2 className="truncate text-[13px] font-semibold text-gray-100">画布智能体</h2>
+              <h2 className="truncate text-[13px] font-semibold theme-text-primary">画布智能体</h2>
               <span className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold ${agentStatusClass}`}>
                 {agentStatus}
               </span>
             </div>
-            <p className="mt-0.5 truncate text-[10px] text-gray-500">
+            <p className="mt-0.5 truncate text-[10px] theme-text-muted">
               {selectedNode ? selectedNode.data.label : '当前没有选中节点'}
             </p>
           </div>
@@ -1867,7 +1867,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
             <button
               type="button"
               onClick={() => setMessages((prev) => prev.slice(0, 1))}
-              className="rounded-lg p-2 text-gray-500 transition hover:bg-white/10 hover:text-gray-200"
+              className="rounded-lg p-2 theme-text-muted transition hover:theme-bg-tertiary hover:theme-text-primary"
               title="清空对话"
             >
               <Trash2 size={15} />
@@ -1876,7 +1876,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-2 text-gray-500 transition hover:bg-white/10 hover:text-gray-200"
+            className="rounded-lg p-2 theme-text-muted transition hover:theme-bg-tertiary hover:theme-text-primary"
             title="关闭"
           >
             <X size={16} />
@@ -1884,13 +1884,13 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
         </div>
       </div>
 
-      <div className="border-b border-white/10 px-4 py-2.5">
+      <div className="border-b theme-border-subtle px-4 py-2.5">
         <div className="flex items-center gap-2 overflow-hidden">
-          <span className="shrink-0 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-semibold text-gray-300">
+          <span className="shrink-0 rounded-md border theme-border-subtle theme-bg-tertiary px-2 py-1 text-[10px] font-semibold theme-text-primary">
             {selectedNode ? selectedNode.data.type : 'NO SELECTION'}
           </span>
           {selectedFacts.map((fact, index) => (
-            <span key={`${fact}-${index}`} className="min-w-0 truncate rounded-md bg-white/[0.035] px-2 py-1 text-[10px] text-gray-500">
+            <span key={`${fact}-${index}`} className="min-w-0 truncate rounded-md theme-bg-secondary px-2 py-1 text-[10px] theme-text-muted">
               {fact}
             </span>
           ))}
@@ -1913,14 +1913,14 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
                 <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${
                   isUser
                     ? 'border-cyan-300/20 bg-cyan-300/10 text-cyan-100'
-                    : 'border-white/10 bg-white/[0.04] text-gray-300'
+                    : 'border-white/10 bg-white/[0.04] theme-text-primary'
                 }`}>
                   {isUser ? <MessageSquare size={14} /> : <Bot size={14} />}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="mb-1 flex items-center gap-2">
-                    <span className="text-[11px] font-semibold text-gray-200">{isUser ? '你' : 'Canvas Agent'}</span>
-                    {!isUser && <span className="text-[9px] text-gray-600">workspace</span>}
+                    <span className="text-[11px] font-semibold theme-text-primary">{isUser ? '你' : 'Canvas Agent'}</span>
+                    {!isUser && <span className="text-[9px] theme-text-muted">workspace</span>}
                   </div>
                   <div className={`rounded-lg border px-3.5 py-3 ${
                     isUser
@@ -1942,7 +1942,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
                     <Check size={14} className="text-amber-200" />
                     <p className="text-[12px] font-semibold text-amber-100">等待你确认</p>
                   </div>
-                  <p className="mt-1.5 text-[11px] leading-relaxed text-gray-300">
+                  <p className="mt-1.5 text-[11px] leading-relaxed theme-text-primary">
                     {pendingRequest.reason || `将执行 ${pendingRequest.actions.length} 个画布动作。`}
                   </p>
                 </div>
@@ -1954,7 +1954,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
                 {pendingRequest.actions.map((action, index) => {
                   const Icon = actionIcon(action.type);
                   return (
-                    <div key={`${action.type}-${index}`} className="flex items-center gap-2 rounded-md border border-white/10 bg-black/20 px-2.5 py-2 text-[10px] text-gray-200">
+                    <div key={`${action.type}-${index}`} className="flex items-center gap-2 rounded-md border border-white/10 bg-black/20 px-2.5 py-2 text-[10px] theme-text-primary">
                       <Icon size={13} className="shrink-0 text-amber-200" />
                       <span className="min-w-0 truncate">{summarizeAction(action)}</span>
                     </div>
@@ -1975,7 +1975,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
                   type="button"
                   onClick={() => setPendingRequest(null)}
                   disabled={isThinking}
-                  className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold text-gray-300 transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-semibold theme-text-primary transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   取消
                 </button>
@@ -1991,8 +1991,8 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
               </div>
               <div className="mt-2 space-y-1">
                 {['理解指令', '检查画布状态', '准备工具动作'].map((label, index) => (
-                  <div key={label} className="flex items-center gap-2 text-[10px] text-gray-500">
-                    <Wrench size={11} className={index === 0 ? 'text-cyan-300' : 'text-gray-600'} />
+                  <div key={label} className="flex items-center gap-2 text-[10px] theme-text-muted">
+                    <Wrench size={11} className={index === 0 ? 'text-cyan-300' : 'theme-text-muted'} />
                     <span>{label}</span>
                   </div>
                 ))}
@@ -2003,7 +2003,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="border-t border-white/10 bg-[#070a0f]/95 p-3.5">
+      <div className="border-t theme-border-subtle theme-bg-primary p-3.5">
         {showQuickPrompts && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {quickPrompts.map((prompt) => (
@@ -2012,7 +2012,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
                 type="button"
                 onClick={() => void sendMessage(prompt)}
                 disabled={isThinking}
-                className="rounded-md border border-white/10 bg-white/[0.035] px-2.5 py-1.5 text-[10px] text-gray-300 transition hover:border-cyan-300/30 hover:bg-cyan-300/[0.06] hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-md border border-white/10 bg-white/[0.035] px-2.5 py-1.5 text-[10px] theme-text-primary transition hover:border-cyan-300/30 hover:bg-cyan-300/[0.06] hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {prompt}
               </button>
@@ -2025,17 +2025,17 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
             {attachments.map((attachment) => (
               <div
                 key={attachment.id}
-                className="flex max-w-full items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5 text-[10px] text-gray-300"
+                className="flex max-w-full items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.035] px-2 py-1.5 text-[10px] theme-text-primary"
                 title={attachment.name}
               >
                 {attachment.kind === 'xlsx' ? <FileText size={12} className="shrink-0 text-emerald-300" /> : <FileUp size={12} className="shrink-0 text-cyan-300" />}
-                <span className="shrink-0 text-gray-500">{getAttachmentKindLabel(attachment.kind)}</span>
+                <span className="shrink-0 theme-text-muted">{getAttachmentKindLabel(attachment.kind)}</span>
                 <span className="max-w-[230px] truncate">{attachment.name}</span>
-                <span className="shrink-0 text-gray-600">{formatFileSize(attachment.size)}</span>
+                <span className="shrink-0 theme-text-muted">{formatFileSize(attachment.size)}</span>
                 <button
                   type="button"
                   onClick={() => removeAttachment(attachment.id)}
-                  className="shrink-0 rounded p-0.5 text-gray-500 transition hover:bg-white/10 hover:text-rose-300"
+                  className="shrink-0 rounded p-0.5 theme-text-muted transition hover:bg-white/10 hover:text-rose-300"
                   title="移除附件"
                 >
                   <X size={11} />
@@ -2045,7 +2045,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
           </div>
         )}
 
-        <div className="rounded-xl border border-white/10 bg-white/[0.035] p-2 shadow-[0_12px_40px_rgba(0,0,0,0.22)] focus-within:border-cyan-300/35">
+        <div className="rounded-xl border theme-border-subtle theme-bg-secondary p-2 theme-shadow-soft focus-within:border-cyan-300/35">
           <input
             ref={attachmentInputRef}
             type="file"
@@ -2069,7 +2069,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
             }}
             rows={2}
             placeholder="让智能体读取、改画布、连节点或运行流程..."
-            className="max-h-32 min-h-14 w-full resize-none bg-transparent px-2 py-1.5 text-[12px] leading-relaxed text-gray-100 outline-none placeholder:text-gray-600"
+            className="max-h-32 min-h-14 w-full resize-none bg-transparent px-2 py-1.5 text-[12px] leading-relaxed theme-text-primary outline-none theme-placeholder-muted"
           />
           <div className="flex items-center justify-between gap-2 border-t border-white/5 pt-2">
             <div className="flex items-center gap-1">
@@ -2077,12 +2077,12 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
                 type="button"
                 onClick={() => attachmentInputRef.current?.click()}
                 disabled={isThinking || isReadingFiles}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-white/10 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md theme-text-secondary transition hover:bg-white/10 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
                 title="添加附件"
               >
                 {isReadingFiles ? <Loader2 size={15} className="animate-spin" /> : <Paperclip size={15} />}
               </button>
-              <span className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-gray-500">
+              <span className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-[10px] theme-text-muted">
                 {nodes.length} 节点 · {edges.length} 连线
               </span>
             </div>

@@ -1,16 +1,37 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark" data-theme-mode="dark">
 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Gemini Canvas AI</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Cpath d='M35 8 18 35h13l-2 21 17-29H33l2-19Z' fill='white'/%3E%3C/svg%3E">
+  <script>
+    (function () {
+      try {
+        var storedTheme = localStorage.getItem('ai-canvas-theme') || localStorage.getItem('theme') || 'dark';
+        var mode = ['dark', 'light', 'system'].indexOf(storedTheme) >= 0 ? storedTheme : 'dark';
+        var resolved = mode === 'system'
+          ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+          : mode;
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.dataset.themeMode = mode;
+        document.documentElement.style.colorScheme = resolved;
+      } catch (error) {
+        document.documentElement.dataset.theme = 'dark';
+        document.documentElement.dataset.themeMode = 'dark';
+      }
+    })();
+  </script>
+  <script defer src="https://cdn.tailwindcss.com"></script>
   <!-- React Flow Base Styles -->
   <link rel="stylesheet" href="/reactflow.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  </noscript>
   <script>
     // Shim process.env for browser environment to prevent ReferenceError
     window.process = {
@@ -24,8 +45,8 @@
       font-family: 'Inter', sans-serif;
       margin: 0;
       overflow: hidden;
-      background-color: #0b0b0f;
-      color: #e2e2e7;
+      background-color: var(--bg-canvas, #0b0b0f);
+      color: var(--text-primary, #e2e2e7);
     }
 
     #root {
@@ -33,71 +54,510 @@
       width: 100vw;
     }
 
-    /* Custom Scrollbar */
-    ::-webkit-scrollbar {
+    .app-splash {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483000;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 100vh;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 70% 38%, rgba(99, 102, 241, 0.24), transparent 34%),
+        radial-gradient(circle at 82% 86%, rgba(139, 92, 246, 0.2), transparent 34%),
+        linear-gradient(135deg, #05060a 0%, #080913 52%, #03040a 100%);
+      color: #f4f6ff;
+      font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      opacity: 1;
+      transition: opacity 520ms ease, visibility 520ms ease;
+    }
+
+    .app-splash.is-hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .app-splash::before {
+      content: "";
+      position: absolute;
+      inset: -20%;
+      background:
+        radial-gradient(circle at 58% 44%, rgba(255, 255, 255, 0.08), transparent 10%),
+        radial-gradient(circle at 67% 54%, rgba(129, 140, 248, 0.16), transparent 18%),
+        radial-gradient(circle at 76% 34%, rgba(14, 165, 233, 0.08), transparent 17%);
+      filter: blur(18px);
+      opacity: 0.72;
+      animation: splash-breathe 4.8s ease-in-out infinite;
+    }
+
+    .app-splash::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+      background-size: 72px 72px;
+      mask-image: radial-gradient(circle at 68% 48%, black 0%, transparent 58%);
+      opacity: 0.36;
+    }
+
+    .app-splash-noise {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        radial-gradient(circle at 20% 10%, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px),
+        radial-gradient(circle at 76% 24%, rgba(129, 140, 248, 0.2) 0 1px, transparent 1px),
+        radial-gradient(circle at 50% 82%, rgba(139, 92, 246, 0.18) 0 1px, transparent 1px);
+      background-size: 140px 120px, 180px 160px, 220px 200px;
+      opacity: 0.36;
+    }
+
+    .app-splash-top {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 34px 54px;
+    }
+
+    .app-splash-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      letter-spacing: -0.05em;
+      font-size: 28px;
+      font-weight: 800;
+      color: rgba(255, 255, 255, 0.96);
+    }
+
+    .app-splash-mark {
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 11px;
+      background: linear-gradient(135deg, #818cf8, #5b21b6);
+      box-shadow: 0 14px 34px rgba(99, 102, 241, 0.32);
+    }
+
+    .app-splash-mark svg {
+      width: 18px;
+      height: 18px;
+      fill: #fff;
+    }
+
+    .app-splash-version {
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+      padding: 8px 13px;
+      background: rgba(255, 255, 255, 0.04);
+      color: rgba(226, 232, 240, 0.66);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      backdrop-filter: blur(14px);
+    }
+
+    .app-splash-main {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: minmax(320px, 0.82fr) minmax(360px, 1.18fr);
+      align-items: center;
+      gap: 46px;
+      width: min(1360px, calc(100vw - 96px));
+      margin: 0 auto;
+      padding: 12px 0 46px;
+    }
+
+    .app-splash-copy {
+      max-width: 520px;
+    }
+
+    .app-splash-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 22px;
+      color: #a5b4fc;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.24em;
+      text-transform: uppercase;
+    }
+
+    .app-splash-eyebrow::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #818cf8;
+      box-shadow: 0 0 18px rgba(129, 140, 248, 0.9);
+    }
+
+    .app-splash-title {
+      margin: 0;
+      font-size: clamp(54px, 7vw, 110px);
+      line-height: 0.92;
+      letter-spacing: -0.075em;
+      font-weight: 850;
+    }
+
+    .app-splash-title span {
+      display: block;
+      background: linear-gradient(135deg, #ffffff 8%, #c7d2fe 44%, #8b5cf6 72%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .app-splash-subtitle {
+      margin: 24px 0 0;
+      color: rgba(226, 232, 240, 0.74);
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.34em;
+    }
+
+    .app-splash-loader {
+      width: min(360px, 82vw);
+      margin-top: 58px;
+    }
+
+    .app-splash-loader-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      color: rgba(226, 232, 240, 0.68);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .app-splash-track {
+      position: relative;
+      height: 2px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.11);
+    }
+
+    .app-splash-track::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 48%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, transparent, #8b5cf6, #38bdf8, transparent);
+      box-shadow: 0 0 18px rgba(129, 140, 248, 0.8);
+      animation: splash-scan 1.65s ease-in-out infinite;
+    }
+
+    .app-splash-visual {
+      position: relative;
+      min-height: 520px;
+      display: grid;
+      place-items: center;
+    }
+
+    .app-splash-orbit {
+      position: absolute;
+      width: min(640px, 48vw);
+      aspect-ratio: 1;
+      border-radius: 999px;
+      background:
+        radial-gradient(circle at 50% 50%, rgba(129, 140, 248, 0.12), transparent 42%),
+        conic-gradient(from 120deg, transparent, rgba(99, 102, 241, 0.22), transparent 34%, rgba(56, 189, 248, 0.13), transparent 68%);
+      filter: blur(0.2px);
+      opacity: 0.72;
+      animation: splash-orbit 9s linear infinite;
+    }
+
+    .app-splash-crystal {
+      position: relative;
+      width: min(360px, 34vw);
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      transform: rotate(-10deg);
+      animation: splash-float 4.2s ease-in-out infinite;
+    }
+
+    .app-splash-cube {
+      position: absolute;
+      inset: 13%;
+      border: 1px solid rgba(255, 255, 255, 0.38);
+      border-radius: 26px;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.28), rgba(129, 140, 248, 0.05) 32%, rgba(139, 92, 246, 0.28) 62%, rgba(56, 189, 248, 0.18)),
+        radial-gradient(circle at 30% 26%, rgba(255, 255, 255, 0.72), transparent 10%),
+        radial-gradient(circle at 58% 62%, rgba(99, 102, 241, 0.8), transparent 34%);
+      box-shadow:
+        inset 0 0 42px rgba(255, 255, 255, 0.22),
+        inset 0 0 90px rgba(99, 102, 241, 0.28),
+        0 28px 110px rgba(99, 102, 241, 0.4);
+      transform: rotate(45deg);
+      backdrop-filter: blur(6px);
+    }
+
+    .app-splash-cube::before,
+    .app-splash-cube::after {
+      content: "";
+      position: absolute;
+      inset: 14%;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 20px;
+      transform: rotate(29deg);
+      background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.26), transparent 58%);
+    }
+
+    .app-splash-cube::after {
+      inset: 28%;
+      border-color: rgba(147, 197, 253, 0.28);
+      animation: splash-core 3s ease-in-out infinite;
+    }
+
+    .app-splash-core {
+      position: relative;
+      z-index: 2;
+      color: rgba(255, 255, 255, 0.94);
+      font-size: clamp(30px, 3.4vw, 54px);
+      font-weight: 850;
+      letter-spacing: -0.06em;
+      transform: rotate(10deg);
+      text-shadow: 0 0 24px rgba(255, 255, 255, 0.42);
+    }
+
+    .app-splash-platform {
+      position: absolute;
+      bottom: 46px;
+      width: min(420px, 38vw);
+      height: 52px;
+      border-radius: 50%;
+      background:
+        radial-gradient(ellipse at center, rgba(255, 255, 255, 0.48), rgba(129, 140, 248, 0.42) 22%, rgba(139, 92, 246, 0.08) 58%, transparent 70%);
+      filter: blur(7px);
+      opacity: 0.76;
+      animation: splash-platform 3.4s ease-in-out infinite;
+    }
+
+    .app-splash-bottom {
+      position: relative;
+      z-index: 2;
+      width: min(960px, calc(100vw - 96px));
+      margin: 0 auto 42px;
+      border: 1px solid rgba(129, 140, 248, 0.24);
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(22, 23, 38, 0.78), rgba(37, 29, 70, 0.52));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 22px 70px rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(18px);
+    }
+
+    .app-splash-status-list {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .app-splash-status-list li {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 11px;
+      min-height: 68px;
+      color: rgba(226, 232, 240, 0.78);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .app-splash-status-list li + li {
+      border-left: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .app-splash-dot {
       width: 8px;
       height: 8px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.38);
+      animation: splash-dot 2.4s ease-in-out infinite;
     }
 
-    ::-webkit-scrollbar-track {
-      background: #1a1a24;
+    .app-splash-status-list li:nth-child(2) .app-splash-dot {
+      animation-delay: 0.34s;
     }
 
-    ::-webkit-scrollbar-thumb {
-      background: #3f3f50;
-      border-radius: 4px;
+    .app-splash-status-list li:nth-child(3) .app-splash-dot {
+      animation-delay: 0.68s;
     }
 
-    ::-webkit-scrollbar-thumb:hover {
-      background: #5a5a75;
+    @keyframes splash-scan {
+      0% { transform: translateX(-110%); opacity: 0.25; }
+      36% { opacity: 1; }
+      100% { transform: translateX(235%); opacity: 0.25; }
     }
 
-    /* React Flow overrides for dark theme */
+    @keyframes splash-float {
+      0%, 100% { transform: translateY(0) rotate(-10deg); }
+      50% { transform: translateY(-12px) rotate(-7deg); }
+    }
+
+    @keyframes splash-breathe {
+      0%, 100% { transform: scale(1); opacity: 0.58; }
+      50% { transform: scale(1.04); opacity: 0.78; }
+    }
+
+    @keyframes splash-orbit {
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes splash-core {
+      0%, 100% { opacity: 0.45; transform: rotate(29deg) scale(1); }
+      50% { opacity: 0.8; transform: rotate(38deg) scale(1.08); }
+    }
+
+    @keyframes splash-platform {
+      0%, 100% { transform: scaleX(1); opacity: 0.62; }
+      50% { transform: scaleX(1.08); opacity: 0.86; }
+    }
+
+    @keyframes splash-dot {
+      0%, 100% {
+        background: rgba(148, 163, 184, 0.38);
+        box-shadow: none;
+      }
+      35%, 62% {
+        background: #818cf8;
+        box-shadow: 0 0 18px rgba(129, 140, 248, 0.9);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .app-splash-top {
+        padding: 24px;
+      }
+
+      .app-splash-version {
+        display: none;
+      }
+
+      .app-splash-main {
+        grid-template-columns: 1fr;
+        width: min(560px, calc(100vw - 48px));
+        gap: 12px;
+        padding-top: 10px;
+      }
+
+      .app-splash-copy {
+        max-width: none;
+      }
+
+      .app-splash-subtitle {
+        font-size: 14px;
+        letter-spacing: 0.22em;
+      }
+
+      .app-splash-visual {
+        min-height: 280px;
+      }
+
+      .app-splash-crystal {
+        width: min(250px, 58vw);
+      }
+
+      .app-splash-platform {
+        width: min(300px, 70vw);
+        bottom: 18px;
+      }
+
+      .app-splash-bottom {
+        width: calc(100vw - 48px);
+        margin-bottom: 24px;
+      }
+
+      .app-splash-status-list {
+        grid-template-columns: 1fr;
+      }
+
+      .app-splash-status-list li {
+        min-height: 46px;
+      }
+
+      .app-splash-status-list li + li {
+        border-left: 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .app-splash,
+      .app-splash *,
+      .app-splash::before,
+      .app-splash::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+
+    /* React Flow critical paint defaults; detailed theme lives in index.css */
     .react-flow__pane {
-      background-color: #0b0b0f;
+      background-color: var(--bg-canvas, #0b0b0f);
     }
 
     .react-flow {
-      background-color: #0b0b0f;
+      background-color: var(--bg-canvas, #0b0b0f);
     }
 
     .react-flow__background {
-      background-color: #0b0b0f !important;
+      background-color: var(--bg-canvas, #0b0b0f) !important;
     }
 
     .react-flow__edge-path {
-      stroke: #4f46e5;
+      stroke: var(--edge-color, #4f46e5);
       stroke-width: 3;
     }
 
     .react-flow__handle {
       width: 10px;
       height: 10px;
-      background: #4f46e5;
-      border: 2px solid #0b0b0f;
+      background: var(--edge-color, #4f46e5);
+      border: 2px solid var(--node-handle-border, #0b0b0f);
     }
 
     .react-flow__controls {
-      background: #1a1a24;
-      border: 1px solid #33334d;
+      background: var(--bg-secondary, #1a1a24);
+      border: 1px solid var(--border-medium, #33334d);
       border-radius: 8px;
-      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+      box-shadow: 0 4px 6px -1px rgba(var(--shadow-rgb, 0, 0, 0), 0.1);
     }
 
     .react-flow__controls button {
-      background: #1a1a24;
-      border-bottom: 1px solid #33334d;
-      color: #e2e2e7;
-      fill: #e2e2e7;
+      background: var(--bg-secondary, #1a1a24);
+      border-bottom: 1px solid var(--border-medium, #33334d);
+      color: var(--text-primary, #e2e2e7);
+      fill: var(--text-primary, #e2e2e7);
     }
 
     .react-flow__controls button:hover {
-      background: #33334d;
+      background: var(--bg-tertiary, #33334d);
     }
 
     .react-flow__attribution {
       background: rgba(0, 0, 0, 0.5);
-      color: #666;
+      color: var(--text-muted, #666);
       display: none;
     }
   </style>
@@ -118,9 +578,69 @@
 }
 </script>
   <link rel="stylesheet" href="/index.css">
+  <script>
+    window.__AI_CANVAS_HIDE_SPLASH__ = function () {
+      var splash = document.getElementById('app-splash');
+      if (!splash || splash.dataset.state === 'hidden') return;
+      splash.dataset.state = 'hidden';
+      splash.classList.add('is-hidden');
+      window.setTimeout(function () {
+        if (splash && splash.parentNode) splash.parentNode.removeChild(splash);
+      }, 620);
+    };
+  </script>
 </head>
 
 <body>
+  <div id="app-splash" class="app-splash" role="status" aria-live="polite">
+    <div class="app-splash-noise"></div>
+    <header class="app-splash-top">
+      <div class="app-splash-brand">
+        <span class="app-splash-mark" aria-hidden="true">
+          <svg viewBox="0 0 64 64" focusable="false" aria-hidden="true">
+            <path d="M35 7 16 36h14l-2 21 20-32H34l1-18Z" />
+          </svg>
+        </span>
+        <span>awei</span>
+      </div>
+      <div class="app-splash-version">Canvas Engine</div>
+    </header>
+
+    <main class="app-splash-main">
+      <section class="app-splash-copy" aria-label="启动状态">
+        <div class="app-splash-eyebrow">AI Workflow Studio</div>
+        <h1 class="app-splash-title">
+          <span>AWEI</span>
+          <span>Canvas</span>
+        </h1>
+        <p class="app-splash-subtitle">正在启动智能画布工作区</p>
+        <div class="app-splash-loader" aria-hidden="true">
+          <div class="app-splash-loader-head">
+            <span>Initializing</span>
+            <span>Stand by</span>
+          </div>
+          <div class="app-splash-track"></div>
+        </div>
+      </section>
+
+      <section class="app-splash-visual" aria-hidden="true">
+        <div class="app-splash-orbit"></div>
+        <div class="app-splash-platform"></div>
+        <div class="app-splash-crystal">
+          <div class="app-splash-cube"></div>
+          <div class="app-splash-core">awei</div>
+        </div>
+      </section>
+    </main>
+
+    <div class="app-splash-bottom" aria-hidden="true">
+      <ul class="app-splash-status-list">
+        <li><span class="app-splash-dot"></span><span>加载节点系统</span></li>
+        <li><span class="app-splash-dot"></span><span>恢复工作区</span></li>
+        <li><span class="app-splash-dot"></span><span>准备模型配置</span></li>
+      </ul>
+    </div>
+  </div>
   <div id="root"></div>
   <script type="module" src="/index.tsx"></script>
 </body>

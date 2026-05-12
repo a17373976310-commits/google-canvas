@@ -12,7 +12,7 @@ interface GroupNodeProps {
 
 export const GroupNode: React.FC<GroupNodeProps> = ({ id, data, selected }) => {
     const updateNodeData = useStore((state) => state.updateNodeData);
-    const color = data.config.color || '#4f46e5';
+    const color = data.config.color || '#6366f1';
 
     return (
         <div className="group/frame relative w-full h-full">
@@ -21,7 +21,7 @@ export const GroupNode: React.FC<GroupNodeProps> = ({ id, data, selected }) => {
                 minWidth={200}
                 minHeight={150}
                 lineStyle={{ borderStyle: 'solid', borderWidth: 2, borderColor: color }}
-                handleStyle={{ width: 12, height: 12, borderRadius: 6, backgroundColor: '#0b0b0f', border: `2px solid ${color}` }}
+                handleStyle={{ width: 12, height: 12, borderRadius: 6, backgroundColor: 'var(--node-handle-border)', border: `2px solid ${color}` }}
             />
 
             {/* Frame Container */}
@@ -35,7 +35,7 @@ export const GroupNode: React.FC<GroupNodeProps> = ({ id, data, selected }) => {
             >
                 {/* Header/Label Area */}
                 <div
-                    className="absolute -top-3 left-6 flex items-center gap-2 px-4 py-1.5 rounded-full border-2 border-inherit pointer-events-auto bg-[#0b0b0f] shadow-lg transition-transform group-hover/frame:scale-105"
+                    className="absolute -top-3 left-6 flex items-center gap-2 px-4 py-1.5 rounded-full border-2 border-inherit pointer-events-auto theme-bg-elevated theme-shadow-soft transition-transform group-hover/frame:scale-105"
                     style={{ borderColor: `${color}80` }}
                 >
                     <Layers size={10} style={{ color: color }} />
@@ -43,7 +43,7 @@ export const GroupNode: React.FC<GroupNodeProps> = ({ id, data, selected }) => {
                         type="text"
                         value={data.label}
                         onChange={(e) => updateNodeData(id, { label: e.target.value })}
-                        className="bg-transparent border-none outline-none text-[10px] font-black uppercase tracking-widest text-white/80 w-32 placeholder:text-gray-700"
+                        className="bg-transparent border-none outline-none text-[10px] font-black uppercase tracking-widest theme-text-primary w-32 theme-placeholder-muted"
                         placeholder="分组标题..."
                     />
                 </div>
@@ -55,7 +55,7 @@ export const GroupNode: React.FC<GroupNodeProps> = ({ id, data, selected }) => {
 
             {/* Background Grid Pattern (Subtle) */}
             <div className="absolute inset-0 pointer-events-none opacity-[0.03] rounded-3xl overflow-hidden">
-                <div className="w-full h-full bg-[radial-gradient(#fff_1px,transparent_1px)] [background-size:20px_20px]" />
+                <div className="w-full h-full bg-[radial-gradient(var(--text-primary)_1px,transparent_1px)] [background-size:20px_20px]" />
             </div>
         </div>
     );

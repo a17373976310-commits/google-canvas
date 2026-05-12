@@ -18,7 +18,12 @@ dist-ssr
 *.local
 .venv
 backend/.venv
+license_server/.venv
+license_server/*.db
 backend/uploads
+backend/history/images/
+output/
+Source code reference/
 backend/__pycache__
 __pycache__
 .ruff_cache

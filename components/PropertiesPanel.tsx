@@ -104,17 +104,17 @@ export const PropertiesPanel = () => {
   };
 
   return (
-    <div className="w-80 bg-[#0f0f15] border-l border-[#1e1e2d] flex flex-col h-full z-10 shadow-[-20px_0_50px_rgba(0,0,0,0.5)] animate-in slide-in-from-right duration-300">
-      <div className="flex items-center justify-between p-6 shrink-0 border-b border-white/5 bg-black/20">
+    <div className="canvas-properties-panel w-80 theme-bg-primary border theme-border-subtle flex flex-col h-full z-10 theme-shadow-panel animate-in slide-in-from-right duration-300">
+      <div className="flex items-center justify-between p-6 shrink-0 border-b theme-border-subtle theme-bg-secondary">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-xl bg-gradient-to-br from-indigo-500/20 to-blue-500/10 text-indigo-400 transition-all">
             <Settings2 size={18} />
           </div>
           <div>
-            <h2 className="text-sm font-black text-white uppercase tracking-widest leading-none flex items-center gap-2">
+            <h2 className="text-sm font-black theme-text-primary uppercase tracking-widest leading-none flex items-center gap-2">
               {selectedNode.data.label}
             </h2>
-            <p className="text-[10px] text-gray-500 font-bold uppercase mt-1 tracking-tighter italic">
+            <p className="text-[10px] theme-text-muted font-bold uppercase mt-1 tracking-tighter italic">
               {componentTypeLabel[selectedNode.data.type] || selectedNode.data.type} 节点属性
             </p>
           </div>
@@ -132,7 +132,7 @@ export const PropertiesPanel = () => {
           )}
           <button
             onClick={() => onSelectionChange(null)}
-            className="p-2 hover:bg-white/5 rounded-lg text-gray-500 hover:text-white transition-all"
+            className="p-2 hover:theme-bg-tertiary rounded-lg theme-text-muted hover:theme-text-primary transition-all"
           >
             <X size={18} />
           </button>
@@ -142,20 +142,20 @@ export const PropertiesPanel = () => {
       <div className="flex-1 overflow-y-auto scrollbar-hide">
         <div className="p-6 space-y-8 relative">
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-gray-500">
+            <div className="flex items-center gap-2 theme-text-muted">
               <Info size={14} />
               <span className="text-[10px] font-bold uppercase tracking-tighter">节点信息</span>
             </div>
-            <div className="p-4 bg-[#161621] rounded-2xl border border-[#1e1e2d]">
-              <span className="block text-[10px] text-gray-500 uppercase font-black">唯一 ID</span>
-              <span className="block text-xs text-gray-300 font-mono mt-1 opacity-50">{selectedNode.id}</span>
-              <span className="block text-[10px] text-gray-500 uppercase font-black mt-4">组件类型</span>
+            <div className="p-4 theme-bg-secondary rounded-2xl border theme-border-subtle">
+              <span className="block text-[10px] theme-text-muted uppercase font-black">唯一 ID</span>
+              <span className="block text-xs theme-text-primary font-mono mt-1 opacity-50">{selectedNode.id}</span>
+              <span className="block text-[10px] theme-text-muted uppercase font-black mt-4">组件类型</span>
               <span className="block text-xs text-indigo-400 font-bold mt-1">{componentTypeLabel[selectedNode.data.type] || selectedNode.data.type}</span>
             </div>
           </div>
 
           <div className="space-y-6 relative">
-            <div className="flex items-center gap-2 text-gray-500">
+            <div className="flex items-center gap-2 theme-text-muted">
               <Sliders size={14} />
               <span className="text-[10px] font-bold uppercase tracking-tighter">参数</span>
             </div>
@@ -164,13 +164,13 @@ export const PropertiesPanel = () => {
               <div className="space-y-4">
                 <div className="p-3 bg-indigo-500/5 rounded-xl border border-indigo-500/10 flex items-center gap-2 mb-4">
                   <Info size={12} className="text-indigo-400" />
-                  <span className="text-[10px] text-gray-500">模型选择已移动到节点顶部菜单</span>
+                  <span className="text-[10px] theme-text-muted">模型选择已移动到节点顶部菜单</span>
                 </div>
 
-                <div className="flex items-center justify-between gap-3 rounded-xl border border-[#1e1e2d] bg-[#11111a] px-3 py-2">
+                <div className="flex items-center justify-between gap-3 rounded-xl border theme-border-subtle theme-bg-secondary px-3 py-2">
                   <div>
-                    <div className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500">提示词访问</div>
-                    <div className="text-[10px] text-gray-600">
+                    <div className="text-[10px] font-black uppercase tracking-[0.2em] theme-text-muted">提示词访问</div>
+                    <div className="text-[10px] theme-text-muted">
                       {isPromptVaultUnlocked ? '本次会话中提示词内容可见。' : '验证密码前，提示词内容将保持隐藏。'}
                     </div>
                   </div>
@@ -198,7 +198,7 @@ export const PropertiesPanel = () => {
                 />
 
                 <label className="block relative">
-                  <span className="text-xs text-gray-400 font-medium mb-2 block">系统提示词（角色）</span>
+                  <span className="text-xs theme-text-secondary font-medium mb-2 block">系统提示词（角色）</span>
                   {isPromptProtected && (
                     <div className="absolute inset-0 top-6 z-10 bg-black/60 backdrop-blur-sm rounded-xl flex items-center justify-center border border-rose-500/20">
                       <div className="text-center">
@@ -208,7 +208,7 @@ export const PropertiesPanel = () => {
                     </div>
                   )}
                   <textarea
-                    className="w-full bg-[#0b0b0f] border border-[#1e1e2d] rounded-xl p-3 text-xs text-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 outline-none transition-all h-32 resize-none"
+                    className="w-full theme-bg-input border theme-border-subtle rounded-xl p-3 text-xs theme-text-primary focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 outline-none transition-all h-32 resize-none"
                     placeholder="示例：你是一位专业文案助手..."
                     value={isPromptProtected ? '********（已加密）' : (selectedNode.data.config.systemInstruction || '')}
                     onChange={(e) => handleConfigChange('systemInstruction', e.target.value)}
@@ -221,9 +221,9 @@ export const PropertiesPanel = () => {
             {selectedNode.data.type === NodeType.INPUT && (
               <div className="space-y-4">
                 <label className="block">
-                  <span className="text-xs text-gray-400 font-medium mb-2 block">输入文本</span>
+                  <span className="text-xs theme-text-secondary font-medium mb-2 block">输入文本</span>
                   <textarea
-                    className="w-full bg-[#0b0b0f] border border-[#1e1e2d] rounded-xl p-3 text-xs text-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 outline-none transition-all h-32 resize-none"
+                    className="w-full theme-bg-input border theme-border-subtle rounded-xl p-3 text-xs theme-text-primary focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 outline-none transition-all h-32 resize-none"
                     value={selectedNode.data.config.prompt || ''}
                     onChange={(e) => handleConfigChange('prompt', e.target.value)}
                     disabled={false}
@@ -236,13 +236,13 @@ export const PropertiesPanel = () => {
               <div className="space-y-6">
                 <div className="p-3 bg-indigo-500/5 rounded-xl border border-indigo-500/10 flex items-center gap-2 mb-2">
                   <Info size={12} className="text-indigo-400" />
-                  <span className="text-[10px] text-gray-500">已启用 Nano-banana 提示词优化，用于结构与风格渲染</span>
+                  <span className="text-[10px] theme-text-muted">已启用 Nano-banana 提示词优化，用于结构与风格渲染</span>
                 </div>
 
 
 
                 <div className="space-y-3">
-                  <span className="text-xs text-gray-400 font-medium block">画面比例</span>
+                  <span className="text-xs theme-text-secondary font-medium block">画面比例</span>
                   <div className="grid grid-cols-5 gap-1.5">
                     {[
                       { label: '1:1', value: '1:1' },
@@ -274,7 +274,7 @@ export const PropertiesPanel = () => {
                             onClick={() => handleAspectRatioChange(ratio.value)}
                             className={`h-10 rounded-lg border transition-all flex flex-col items-center justify-center ${selectedAspectRatio === ratio.value
                               ? 'bg-indigo-500 border-indigo-400 text-white shadow-[0_4px_12px_rgba(99,102,241,0.3)]'
-                              : 'bg-[#0b0b0f] border-[#1e1e2d] text-gray-500 hover:border-gray-500'
+                              : 'theme-bg-input theme-border-subtle theme-text-muted hover:theme-border-strong'
                               }`}
                             title={ratio.value}
                             disabled={false}
@@ -288,9 +288,9 @@ export const PropertiesPanel = () => {
                 </div>
 
                 {supportsImageSize && (
-                  <div className="space-y-3 pt-2 border-t border-[#1e1e2d]">
+                  <div className="space-y-3 pt-2 border-t theme-border-subtle">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-xs text-gray-400 font-medium block">{imageSizeLabel}</span>
+                      <span className="text-xs theme-text-secondary font-medium block">{imageSizeLabel}</span>
                       {imageSizeHint && <span className="text-[9px] text-cyan-400">{imageSizeHint}</span>}
                     </div>
                     <div className="flex gap-2">
@@ -308,7 +308,7 @@ export const PropertiesPanel = () => {
                             onClick={() => handleConfigChange('imageSize', q.value)}
                             className={`flex-1 px-3 py-3 rounded-xl border transition-all text-left ${(selectedNode.data.config.imageSize || '1K') === q.value
                               ? 'bg-indigo-500 border-indigo-400 text-white shadow-[0_4px_12px_rgba(99,102,241,0.2)]'
-                              : 'bg-[#0b0b0f] border-[#1e1e2d] text-gray-500 hover:border-gray-500'
+                              : 'theme-bg-input theme-border-subtle theme-text-muted hover:theme-border-strong'
                               }`}
                             disabled={false}
                           >
@@ -321,8 +321,8 @@ export const PropertiesPanel = () => {
                 )}
 
                 {isGptImage2Model && (
-                  <div className="space-y-3 pt-2 border-t border-[#1e1e2d]">
-                    <span className="text-xs text-gray-400 font-medium block">质量</span>
+                  <div className="space-y-3 pt-2 border-t theme-border-subtle">
+                    <span className="text-xs theme-text-secondary font-medium block">质量</span>
                     <div className="grid grid-cols-4 gap-2">
                       {[
                         { label: '自动', value: 'auto' },
@@ -335,7 +335,7 @@ export const PropertiesPanel = () => {
                           onClick={() => handleConfigChange('imageQuality', quality.value)}
                           className={`px-2 py-3 rounded-xl border transition-all text-center ${(selectedNode.data.config.imageQuality || 'auto') === quality.value
                             ? 'bg-orange-500 border-orange-400 text-white shadow-[0_4px_12px_rgba(249,115,22,0.2)]'
-                            : 'bg-[#0b0b0f] border-[#1e1e2d] text-gray-500 hover:border-gray-500'
+                            : 'theme-bg-input theme-border-subtle theme-text-muted hover:theme-border-strong'
                             }`}
                           disabled={false}
                         >
@@ -346,15 +346,15 @@ export const PropertiesPanel = () => {
                   </div>
                 )}
 
-                <div className="space-y-3 pt-2 border-t border-[#1e1e2d]">
+                <div className="space-y-3 pt-2 border-t theme-border-subtle">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs text-gray-400 font-medium block">图像提示词</span>
-                    <span className={`text-[9px] font-bold ${isPromptConnected ? 'text-amber-400' : 'text-gray-600'}`}>
+                    <span className="text-xs theme-text-secondary font-medium block">图像提示词</span>
+                    <span className={`text-[9px] font-bold ${isPromptConnected ? 'text-amber-400' : 'theme-text-muted'}`}>
                       {isPromptConnected ? '已连接上游提示词，下方显示实际使用内容' : '默认使用本地提示词'}
                     </span>
                   </div>
                   <textarea
-                    className="w-full bg-[#0b0b0f] border border-[#1e1e2d] rounded-xl p-3 text-xs text-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 outline-none transition-all h-24 resize-none"
+                    className="w-full theme-bg-input border theme-border-subtle rounded-xl p-3 text-xs theme-text-primary focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 outline-none transition-all h-24 resize-none"
                     placeholder={isPromptConnected
                       ? '当前提示词会自动从上游注入...'
                       : '在这里输入图像提示词；未连接提示词节点时将使用它...'}
@@ -370,11 +370,11 @@ export const PropertiesPanel = () => {
               <div className="space-y-6">
                 <div className="p-3 bg-rose-500/5 rounded-xl border border-rose-500/10 flex items-center gap-2 mb-2">
                   <Info size={12} className="text-rose-400" />
-                  <span className="text-[10px] text-gray-500">视频生成通常需要 1-3 分钟，请耐心等待</span>
+                  <span className="text-[10px] theme-text-muted">视频生成通常需要 1-3 分钟，请耐心等待</span>
                 </div>
 
                 <div className="space-y-3">
-                  <span className="text-xs text-gray-400 font-medium block">视频比例</span>
+                  <span className="text-xs theme-text-secondary font-medium block">视频比例</span>
                   <div className="grid grid-cols-3 gap-2">
                     {[
                       { label: '16:9', value: '16:9', desc: '横屏' },
@@ -388,7 +388,7 @@ export const PropertiesPanel = () => {
                           onClick={() => handleConfigChange('aspectRatio', ratio.value)}
                           className={`px-3 py-3 rounded-xl border transition-all text-center ${(selectedNode.data.config.aspectRatio || '16:9') === ratio.value
                             ? 'bg-rose-500 border-rose-400 text-white shadow-[0_4px_12px_rgba(244,63,94,0.3)]'
-                            : 'bg-[#0b0b0f] border-[#1e1e2d] text-gray-500 hover:border-gray-500'
+                            : 'theme-bg-input theme-border-subtle theme-text-muted hover:theme-border-strong'
                             }`}
                           disabled={false}
                         >
@@ -400,8 +400,8 @@ export const PropertiesPanel = () => {
                 </div>
 
                 {capabilities.allowedDurations && capabilities.allowedDurations.length > 0 && (
-                  <div className="space-y-3 pt-2 border-t border-[#1e1e2d]">
-                    <span className="text-xs text-gray-400 font-medium block">视频时长</span>
+                  <div className="space-y-3 pt-2 border-t theme-border-subtle">
+                    <span className="text-xs theme-text-secondary font-medium block">视频时长</span>
                     <div className="flex gap-2">
                       {[
                         { label: '5s', value: '5', desc: '短' },
@@ -416,7 +416,7 @@ export const PropertiesPanel = () => {
                             onClick={() => handleConfigChange('duration', d.value)}
                             className={`flex-1 px-3 py-3 rounded-xl border transition-all text-center ${(selectedNode.data.config.duration || '5') === d.value
                               ? 'bg-rose-500 border-rose-400 text-white shadow-[0_4px_12px_rgba(244,63,94,0.2)]'
-                              : 'bg-[#0b0b0f] border-[#1e1e2d] text-gray-500 hover:border-gray-500'
+                              : 'theme-bg-input theme-border-subtle theme-text-muted hover:theme-border-strong'
                               }`}
                             disabled={false}
                           >
@@ -429,28 +429,28 @@ export const PropertiesPanel = () => {
                 )}
 
                 {selectedNode.data.config?.modelId === 'sora-2-pro' && (
-                  <div className="space-y-3 pt-2 border-t border-[#1e1e2d]">
-                    <span className="text-xs text-gray-400 font-medium block">高清模式</span>
+                  <div className="space-y-3 pt-2 border-t theme-border-subtle">
+                    <span className="text-xs theme-text-secondary font-medium block">高清模式</span>
                     <button
                       onClick={() => handleConfigChange('hd', !selectedNode.data.config.hd)}
                       className={`w-full px-4 py-3 rounded-xl border transition-all flex items-center justify-between ${selectedNode.data.config.hd
                         ? 'bg-rose-500 border-rose-400 text-white shadow-[0_4px_12px_rgba(244,63,94,0.2)]'
-                        : 'bg-[#0b0b0f] border-[#1e1e2d] text-gray-500 hover:border-gray-500'
+                        : 'theme-bg-input theme-border-subtle theme-text-muted hover:theme-border-strong'
                         }`}
                       disabled={false}
                     >
                       <span className="text-[10px] font-black">HD</span>
-                      <span className={`text-[10px] font-bold ${selectedNode.data.config.hd ? 'text-white' : 'text-gray-600'}`}>
+                      <span className={`text-[10px] font-bold ${selectedNode.data.config.hd ? 'text-white' : 'theme-text-muted'}`}>
                         {selectedNode.data.config.hd ? '开启' : '关闭'}
                       </span>
                     </button>
                   </div>
                 )}
 
-                <div className="space-y-3 pt-2 border-t border-[#1e1e2d]">
-                  <span className="text-xs text-gray-400 font-medium block">视频提示词</span>
+                <div className="space-y-3 pt-2 border-t theme-border-subtle">
+                  <span className="text-xs theme-text-secondary font-medium block">视频提示词</span>
                   <textarea
-                    className="w-full bg-[#0b0b0f] border border-[#1e1e2d] rounded-xl p-3 text-xs text-gray-300 focus:border-rose-500 focus:ring-1 focus:ring-rose-500/20 outline-none transition-all h-24 resize-none"
+                    className="w-full theme-bg-input border theme-border-subtle rounded-xl p-3 text-xs theme-text-primary focus:border-rose-500 focus:ring-1 focus:ring-rose-500/20 outline-none transition-all h-24 resize-none"
                     placeholder="描述你想生成的视频...（也可以由上游提示词节点传入）"
                     value={selectedNode.data.config.prompt || ''}
                     onChange={(e) => handleConfigChange('prompt', e.target.value)}
@@ -462,9 +462,9 @@ export const PropertiesPanel = () => {
           </div>
 
           {(selectedNode.data.output || selectedNode.data.config.prompt) && (
-            <div className="space-y-4 pt-8 border-t border-[#1e1e2d] animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="space-y-4 pt-8 border-t theme-border-subtle animate-in fade-in slide-in-from-bottom-4 duration-500">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-gray-500">
+                <div className="flex items-center gap-2 theme-text-muted">
                   <Eye size={14} />
                   <span className="text-[10px] font-bold uppercase tracking-tighter">输出预览</span>
                 </div>
@@ -482,10 +482,10 @@ export const PropertiesPanel = () => {
 
               {(selectedNode.data.type === NodeType.AI_CHAT || selectedNode.data.type === NodeType.INPUT) && (
                 <div className="group relative">
-                  <div className="w-full bg-[#0b0b0f] border border-[#1e1e2d] rounded-2xl p-4 text-[11px] text-gray-400 leading-relaxed max-h-64 overflow-y-auto scrollbar-thin scrollbar-thumb-indigo-500/20 hover:scrollbar-thumb-indigo-500/40 transition-all font-medium whitespace-pre-wrap selection:bg-indigo-500/30">
+                  <div className="w-full theme-bg-input border theme-border-subtle rounded-2xl p-4 text-[11px] theme-text-secondary leading-relaxed max-h-64 overflow-y-auto scrollbar-thin scrollbar-thumb-indigo-500/20 hover:scrollbar-thumb-indigo-500/40 transition-all font-medium whitespace-pre-wrap selection:bg-indigo-500/30">
                     {selectedNode.data.output || selectedNode.data.config.prompt || '暂无内容...'}
                   </div>
-                  <div className="absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[#0b0b0f] to-transparent rounded-b-2xl pointer-events-none opacity-50" />
+                  <div className="absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[var(--input-bg)] to-transparent rounded-b-2xl pointer-events-none opacity-50" />
                 </div>
               )}
 
@@ -495,22 +495,22 @@ export const PropertiesPanel = () => {
                 && selectedNode.data.output
                 && !Array.isArray(selectedNode.data.output) && (
                   <div className="group relative">
-                    <pre className="w-full bg-[#0b0b0f] border border-[#1e1e2d] rounded-2xl p-4 text-[10px] text-gray-400 leading-relaxed max-h-64 overflow-auto whitespace-pre-wrap break-all scrollbar-thin scrollbar-thumb-indigo-500/20 hover:scrollbar-thumb-indigo-500/40 transition-all font-mono selection:bg-indigo-500/30">
+                    <pre className="w-full theme-bg-input border theme-border-subtle rounded-2xl p-4 text-[10px] theme-text-secondary leading-relaxed max-h-64 overflow-auto whitespace-pre-wrap break-all scrollbar-thin scrollbar-thumb-indigo-500/20 hover:scrollbar-thumb-indigo-500/40 transition-all font-mono selection:bg-indigo-500/30">
                       {objectOutputPreview}
                     </pre>
-                    <div className="absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[#0b0b0f] to-transparent rounded-b-2xl pointer-events-none opacity-50" />
+                    <div className="absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[var(--input-bg)] to-transparent rounded-b-2xl pointer-events-none opacity-50" />
                   </div>
                 )}
 
               {selectedNode.data.type === NodeType.MULTI_IMAGE_UPLOAD && outputImages.length > 0 && (
                 <div className="space-y-2">
-                  <div className="text-[9px] text-gray-500 font-black uppercase tracking-wider">{outputImages.length} 项</div>
+                  <div className="text-[9px] theme-text-muted font-black uppercase tracking-wider">{outputImages.length} 项</div>
                   <div className="grid grid-cols-3 gap-2">
                     {outputImages.map((img, idx) => (
                       <button
                         key={`${selectedNode.id}-preview-${idx}`}
                         type="button"
-                        className="relative overflow-hidden rounded-xl border border-[#1e1e2d] bg-[#0b0b0f] hover:border-indigo-500/40 transition-colors"
+                        className="relative overflow-hidden rounded-xl border theme-border-subtle theme-bg-input hover:border-indigo-500/40 transition-colors"
                         onClick={() => {
                           (window as any).openLightbox?.(img);
                         }}
@@ -531,7 +531,7 @@ export const PropertiesPanel = () => {
               {(selectedNode.data.type === NodeType.AI_IMAGE ||
                 selectedNode.data.type === NodeType.IMAGE_UPLOAD) && typeof selectedNode.data.output === 'string' && selectedNode.data.output && (
                   <div
-                    className="relative group cursor-zoom-in overflow-hidden rounded-2xl border border-[#1e1e2d] bg-[#0b0b0f]"
+                    className="relative group cursor-zoom-in overflow-hidden rounded-2xl border theme-border-subtle theme-bg-input"
                     onClick={() => {
                       if (selectedNode.data.output) {
                         (window as any).openLightbox?.(selectedNode.data.output as string);
@@ -555,7 +555,7 @@ export const PropertiesPanel = () => {
                 )}
 
               {selectedNode.data.type === NodeType.AI_VIDEO && typeof selectedNode.data.output === 'string' && selectedNode.data.output && (
-                <div className="relative group overflow-hidden rounded-2xl border border-[#1e1e2d] bg-[#0b0b0f]">
+                <div className="relative group overflow-hidden rounded-2xl border theme-border-subtle theme-bg-input">
                   <video
                     src={selectedNode.data.output}
                     controls
@@ -586,8 +586,8 @@ export const PropertiesPanel = () => {
         />
       )}
 
-      <div className="p-6 bg-[#0b0b0f] border-t border-[#1e1e2d] shrink-0">
-        <div className="flex items-center gap-3 text-[10px] text-gray-600">
+      <div className="p-6 theme-bg-primary border-t theme-border-subtle shrink-0">
+        <div className="flex items-center gap-3 text-[10px] theme-text-muted">
           <Type size={14} />
           <span>状态：{{
             'idle': '空闲',

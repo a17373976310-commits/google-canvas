@@ -129,16 +129,16 @@ export const PromptTemplateManager: React.FC<PromptTemplateManagerProps> = ({
     const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
 
     return (
-        <div className="flex flex-col gap-3 rounded-2xl border border-[#1e1e2d] bg-[#161621] p-1">
-            <div className="flex items-center justify-between border-b border-[#2a2a3a]/50 px-3 py-2">
+        <div className="flex flex-col gap-3 rounded-2xl border theme-border-subtle theme-bg-secondary p-1">
+            <div className="flex items-center justify-between border-b theme-border-medium px-3 py-2">
                 <div className="flex items-center gap-2">
                     <FileText size={14} className="text-emerald-500" />
-                    <span className="text-[10px] font-black uppercase tracking-wider text-gray-400">Prompt Templates</span>
+                    <span className="text-[10px] font-black uppercase tracking-wider theme-text-secondary">Prompt Templates</span>
                 </div>
 
                 <div className="flex items-center gap-1">
                     <label
-                        className={`rounded-lg p-1.5 text-gray-500 transition-colors ${(disabled || manageDisabled) ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-[#2a2a3a] hover:text-indigo-400'}`}
+                        className={`rounded-lg p-1.5 theme-text-muted transition-colors ${(disabled || manageDisabled) ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:theme-bg-tertiary hover:text-indigo-400'}`}
                         title="Upload template (.txt)"
                     >
                         <Upload size={12} />
@@ -149,7 +149,7 @@ export const PromptTemplateManager: React.FC<PromptTemplateManagerProps> = ({
                             if (!disabled && !manageDisabled) setShowSaveInput(true);
                         }}
                         disabled={disabled || manageDisabled}
-                        className={`rounded-lg p-1.5 text-gray-500 transition-colors ${(disabled || manageDisabled) ? 'cursor-not-allowed opacity-40' : 'hover:bg-[#2a2a3a] hover:text-emerald-400'}`}
+                        className={`rounded-lg p-1.5 theme-text-muted transition-colors ${(disabled || manageDisabled) ? 'cursor-not-allowed opacity-40' : 'hover:theme-bg-tertiary hover:text-emerald-400'}`}
                         title="Save current content as template"
                     >
                         <Save size={12} />
@@ -165,14 +165,14 @@ export const PromptTemplateManager: React.FC<PromptTemplateManagerProps> = ({
                             value={saveName}
                             onChange={(event) => setSaveName(event.target.value)}
                             placeholder="Template name..."
-                            className="flex-1 rounded-lg border border-[#2a2a3a] bg-[#0b0b0f] px-2 py-1.5 text-xs text-gray-300 outline-none focus:border-emerald-500"
+                            className="flex-1 rounded-lg border theme-border-medium theme-bg-input px-2 py-1.5 text-xs theme-text-primary outline-none focus:border-emerald-500"
                             autoFocus
                             disabled={disabled || manageDisabled}
                         />
                         <button onClick={handleSave} className="rounded-lg bg-emerald-500/20 p-1.5 text-emerald-500 hover:bg-emerald-500/30">
                             <Check size={12} />
                         </button>
-                        <button onClick={() => setShowSaveInput(false)} className="p-1.5 text-gray-500 hover:text-gray-300">
+                        <button onClick={() => setShowSaveInput(false)} className="p-1.5 theme-text-muted hover:theme-text-primary">
                             <X size={12} />
                         </button>
                     </div>
@@ -185,39 +185,39 @@ export const PromptTemplateManager: React.FC<PromptTemplateManagerProps> = ({
                         if (!disabled) setIsExpanded(!isExpanded);
                     }}
                     disabled={disabled}
-                    className={`group flex w-full items-center justify-between rounded-xl border px-3 py-2 text-xs transition-colors ${disabled ? 'cursor-not-allowed border-[#2a2a3a] bg-[#0b0b0f]/60 text-gray-600' : 'border-[#2a2a3a] bg-[#0b0b0f] text-gray-300 hover:border-emerald-500/50'}`}
+                    className={`group flex w-full items-center justify-between rounded-xl border px-3 py-2 text-xs transition-colors ${disabled ? 'cursor-not-allowed theme-border-medium theme-bg-node-content theme-text-muted' : 'theme-border-medium theme-bg-input theme-text-primary hover:border-emerald-500/50'}`}
                 >
                     <div className="flex items-center gap-2 truncate">
                         {selectedTemplate ? (
                             <>
-                                {selectedTemplate.isLocked ? <Lock size={10} className="text-gray-500" /> : <FileText size={10} className="text-emerald-500" />}
+                                {selectedTemplate.isLocked ? <Lock size={10} className="theme-text-muted" /> : <FileText size={10} className="text-emerald-500" />}
                                 <span className="truncate">{selectedTemplate.name}</span>
                             </>
                         ) : (
-                            <span className="italic text-gray-500">Choose a template...</span>
+                            <span className="italic theme-text-muted">Choose a template...</span>
                         )}
                     </div>
-                    <ChevronDown size={12} className={`text-gray-500 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                    <ChevronDown size={12} className={`theme-text-muted transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                 </button>
 
                 {isExpanded && (
-                    <div className="absolute left-0 right-0 top-full z-50 mx-3 mt-1 max-h-48 overflow-y-auto overflow-x-hidden rounded-xl border border-[#2a2a3a] bg-[#1e1e2d] shadow-2xl">
+                    <div className="absolute left-0 right-0 top-full z-50 mx-3 mt-1 max-h-48 overflow-y-auto overflow-x-hidden rounded-xl border theme-border-medium theme-bg-tertiary shadow-2xl">
                         {templates.map((template) => (
                             <div
                                 key={template.id}
                                 onClick={() => handleSelect(template)}
-                                className="group flex cursor-pointer items-center justify-between px-3 py-2 hover:bg-[#2a2a3a]"
+                                className="group flex cursor-pointer items-center justify-between px-3 py-2 hover:theme-bg-tertiary"
                             >
                                 <div className="flex items-center gap-2 truncate">
-                                    {template.isLocked && <Lock size={10} className="text-gray-600" />}
-                                    <span className={`truncate text-xs ${selectedTemplateId === template.id ? 'font-bold text-emerald-400' : 'text-gray-400'}`}>
+                                    {template.isLocked && <Lock size={10} className="theme-text-muted" />}
+                                    <span className={`truncate text-xs ${selectedTemplateId === template.id ? 'font-bold text-emerald-400' : 'theme-text-secondary'}`}>
                                         {template.name}
                                     </span>
                                 </div>
                                 {!template.isLocked && (
                                     <button
                                         onClick={(event) => handleDelete(template.id, event)}
-                                        className="rounded p-1 text-gray-600 opacity-0 transition-colors group-hover:opacity-100 hover:bg-rose-500/20 hover:text-rose-400"
+                                        className="rounded p-1 theme-text-muted opacity-0 transition-colors group-hover:opacity-100 hover:bg-rose-500/20 hover:text-rose-400"
                                     >
                                         <Trash2 size={10} />
                                     </button>
@@ -230,7 +230,7 @@ export const PromptTemplateManager: React.FC<PromptTemplateManagerProps> = ({
 
             {selectedTemplate && (
                 <div className="px-3 pb-2">
-                    <div className="flex items-center gap-1 text-[10px] text-gray-600">
+                    <div className="flex items-center gap-1 text-[10px] theme-text-muted">
                         <Check size={10} className="text-emerald-500" />
                         <span>Template applied to the editor below.</span>
                     </div>

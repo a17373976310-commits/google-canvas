@@ -15,10 +15,12 @@ import { APIProvider, CanvasState, NodeType, NodeData, NODE_MODALITIES, NodeCapa
 import { v4 as uuidv4 } from 'uuid';
 import { AIService } from './services/aiService';
 import { getModelCapabilities } from './config/modelCapabilities';
+import { inferConnectionHandles } from './config/nodeSpecs';
 import { normalizeImageSrc } from './utils/normalizeImageSrc';
 import { DEFAULT_CHAT_PROMPT_TEMPLATE } from './config/promptTemplates';
 
 let stopExecutionRequested = false;
+const activeNodeAbortControllers = new Map<string, AbortController>();
 
 const nodeProgressTimers = new Map<string, ReturnType<typeof setInterval>>();
 const MAX_WORKFLOW_CONCURRENCY = 10;
@@ -689,7 +691,7 @@ const isCanonicalImageResult = (value: unknown): value is CanonicalImageResult =
 
 const getPrimaryImageUrl = (value: unknown): string | undefined => {
   if (isCanonicalImageResult(value)) {
-    const direct = normalizeImageSrc(value.primaryUrl || value.localCacheUrl || value.urls[0] || '');
+    const direct = normalizeImageSrc(value.localCacheUrl || value.primaryUrl || value.urls[0] || '');
     return direct || undefined;
   }
 
@@ -699,9 +701,13 @@ const getPrimaryImageUrl = (value: unknown): string | undefined => {
 
 const getAllImageUrls = (value: unknown): string[] => {
   if (isCanonicalImageResult(value)) {
-    const normalized = value.urls
+    const cacheUrl = normalizeImageSrc(value.localCacheUrl || '');
+    const normalized = [
+      ...(cacheUrl ? [cacheUrl] : []),
+      ...value.urls,
+    ]
       .map((item) => normalizeImageSrc(item) || '')
-      .filter(Boolean);
+      .filter((item, index, all) => Boolean(item) && all.indexOf(item) === index);
     if (normalized.length > 0) return normalized;
     const primary = getPrimaryImageUrl(value);
     return primary ? [primary] : [];
@@ -2846,6 +2852,7 @@ const createBatchMappingEdge = (params: {
   id: params.batchId
     ? `edge-${params.batchNodeId}-${params.targetNodeId}-${params.batchId}`
     : `edge-${params.batchNodeId}-${params.targetNodeId}`,
+  type: 'soft',
   source: params.batchNodeId,
   sourceHandle: params.sourceHandle || 'batch',
   target: params.targetNodeId,
@@ -5276,9 +5283,10 @@ export const useStore = create<CanvasState>((set, get) => ({
   ],
   edges: [
     {
-      animated: true,
+      type: 'soft',
+      animated: false,
       style: {
-        strokeWidth: 4,
+        strokeWidth: 1.5,
         stroke: '#4f46e5'
       },
       source: 'default-input-node',
@@ -5288,9 +5296,10 @@ export const useStore = create<CanvasState>((set, get) => ({
       id: 'default-edge-input-chat'
     },
     {
-      animated: true,
+      type: 'soft',
+      animated: false,
       style: {
-        strokeWidth: 4,
+        strokeWidth: 1.5,
         stroke: '#4f46e5'
       },
       source: 'default-upload-node',
@@ -5300,9 +5309,10 @@ export const useStore = create<CanvasState>((set, get) => ({
       id: 'default-edge-upload-chat'
     },
     {
-      animated: true,
+      type: 'soft',
+      animated: false,
       style: {
-        strokeWidth: 4,
+        strokeWidth: 1.5,
         stroke: '#4f46e5'
       },
       source: 'default-chat-node',
@@ -5312,9 +5322,10 @@ export const useStore = create<CanvasState>((set, get) => ({
       id: 'default-edge-chat-image'
     },
     {
-      animated: true,
+      type: 'soft',
+      animated: false,
       style: {
-        strokeWidth: 4,
+        strokeWidth: 1.5,
         stroke: '#4f46e5'
       },
       source: 'default-upload-node',
@@ -5478,15 +5489,21 @@ export const useStore = create<CanvasState>((set, get) => ({
   },
 
   requestStopWorkflow: () => {
+    stopExecutionRequested = true;
+    activeNodeAbortControllers.forEach((controller) => controller.abort());
+    activeNodeAbortControllers.clear();
+    stopAllNodeProgress();
     get().addLog('warn', 'Stop requested. Execution will stop after the current node finishes.');
-    get().addLog('warn', 'Stop requested. Execution will stop after the current node finishes.');
-    get().pushNotice('warn', 'Stop requested. Waiting for the current node to finish...');
+    get().pushNotice('warn', 'Stop requested. Current API requests are being cancelled...');
   },
 
   requestStopConcurrent: () => {
+    stopExecutionRequested = true;
+    activeNodeAbortControllers.forEach((controller) => controller.abort());
+    activeNodeAbortControllers.clear();
+    stopAllNodeProgress();
     get().addLog('warn', `Concurrent execution stop requested (limit ${MAX_WORKFLOW_CONCURRENCY}). Running tasks will finish but no new task will start.`);
-    get().addLog('warn', `Concurrent execution stop requested (limit ${MAX_WORKFLOW_CONCURRENCY}). Running tasks will finish but no new task will start.`);
-    get().pushNotice('warn', 'Stop requested and queue paused. Waiting for the current task to finish...');
+    get().pushNotice('warn', 'Stop requested and queue paused. Current API requests are being cancelled...');
   },
 
   onNodesChange: (changes: NodeChange[]) => {
@@ -5504,7 +5521,14 @@ export const useStore = create<CanvasState>((set, get) => ({
   },
 
   onConnect: (connection: Connection) => {
-    set({ edges: addEdge({ ...connection, animated: true }, get().edges) });
+    set({
+      edges: addEdge({
+        ...connection,
+        type: 'soft',
+        animated: false,
+        style: { strokeWidth: 1.5 }
+      }, get().edges)
+    });
   },
 
   removeEdge: (edgeId: string) => {
@@ -5802,14 +5826,22 @@ export const useStore = create<CanvasState>((set, get) => ({
       newNode.data.label = DEFAULT_NODE_LABELS[type]!;
     }
 
+    const sourceNode = connectFromId ? get().nodes.find((node) => node.id === connectFromId) : undefined;
+    const inferredHandles = connectFromId
+      ? inferConnectionHandles(sourceNode?.data?.type || sourceNode?.type, type)
+      : {};
     const nextEdges = connectFromId
       ? [
         ...get().edges,
         {
           id: `e-${connectFromId}-${id}-${Date.now()}`,
+          type: 'soft',
           source: connectFromId,
+          sourceHandle: inferredHandles.sourceHandle || null,
           target: id,
-          animated: true
+          targetHandle: inferredHandles.targetHandle || null,
+          animated: false,
+          style: { strokeWidth: 1.5 }
         }
       ]
       : get().edges;
@@ -6501,10 +6533,18 @@ export const useStore = create<CanvasState>((set, get) => ({
         // Resolve blob URLs to Base64 just-in-time for backend communication
         const resolvedApiInputs = await resolvePayloadBeforeApi(requestInputs);
 
-        const output = await service.executeNode(
-          node.id, node.type, requestConfig, resolvedApiInputs,
-          buildApiSettings(provider)!
-        );
+        const nodeAbortController = new AbortController();
+        activeNodeAbortControllers.set(node.id, nodeAbortController);
+        let output: any;
+        try {
+          output = await service.executeNode(
+            node.id, node.type, requestConfig, resolvedApiInputs,
+            buildApiSettings(provider)!,
+            { signal: nodeAbortController.signal }
+          );
+        } finally {
+          activeNodeAbortControllers.delete(node.id);
+        }
 
         const rawOutput = output?.output ?? output;
         // 鍥剧墖/瑙嗛鑺傜偣褰掍竴鍖?output 涓哄共鍑€瀛楃涓?
@@ -7208,13 +7248,21 @@ export const useStore = create<CanvasState>((set, get) => ({
       // Resolve blob URLs to Base64 just-in-time for backend communication
       const resolvedApiInputs = await resolvePayloadBeforeApi(requestInputs);
 
-      const output = await service.executeNode(
-        id,
-        node.type,
-        requestConfig,
-        resolvedApiInputs,
-        buildApiSettings(activeProvider)!
-      );
+      const nodeAbortController = new AbortController();
+      activeNodeAbortControllers.set(id, nodeAbortController);
+      let output: any;
+      try {
+        output = await service.executeNode(
+          id,
+          node.type,
+          requestConfig,
+          resolvedApiInputs,
+          buildApiSettings(activeProvider)!,
+          { signal: nodeAbortController.signal }
+        );
+      } finally {
+        activeNodeAbortControllers.delete(id);
+      }
 
       const rawFinalOutput = output?.output ?? output;
       // 鍥剧墖/瑙嗛鑺傜偣褰掍竴鍖?output 涓哄共鍑€瀛楃涓?

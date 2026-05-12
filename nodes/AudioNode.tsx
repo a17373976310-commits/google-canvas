@@ -50,8 +50,8 @@ export const AudioNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected })
 
   return (
     <BaseNode id={id} data={data} icon={Volume2} color="bg-cyan-500" selected={selected}>
-      <Handle type="target" position={Position.Left} className="!w-3 !h-3 !bg-cyan-500 !border-2 !border-[#0b0b0f]" />
-      <Handle type="source" position={Position.Right} className="!w-3 !h-3 !bg-cyan-500 !border-2 !border-[#0b0b0f]" />
+      <Handle type="target" position={Position.Left} className="!w-3 !h-3 !bg-cyan-500 !border-2 theme-handle-border" />
+      <Handle type="source" position={Position.Right} className="!w-3 !h-3 !bg-cyan-500 !border-2 theme-handle-border" />
 
       {data.output ? (
         <div className="space-y-4 flex-1 flex flex-col justify-center">
@@ -61,12 +61,12 @@ export const AudioNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected })
             </div>
             <div>
               <span className="block text-[10px] font-bold text-cyan-400 uppercase leading-none mb-1">已生成的音频 (PCM)</span>
-              <span className="block text-xs text-gray-400 font-mono italic">24kHz 单声道 16位</span>
+              <span className="block text-xs theme-text-secondary font-mono italic">24kHz 单声道 16位</span>
             </div>
           </div>
           <button
             onClick={playPCM}
-            className={`w-full flex items-center justify-center gap-3 p-4 rounded-xl border transition-all duration-300 transform active:scale-95 ${isPlaying ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_20px_rgba(6,182,212,0.2)]' : 'bg-[#0b0b0f] border-[#2a2a3a] text-gray-500 hover:text-white hover:border-gray-500 hover:bg-gray-500/5'
+            className={`w-full flex items-center justify-center gap-3 p-4 rounded-xl border transition-all duration-300 transform active:scale-95 ${isPlaying ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_20px_rgba(6,182,212,0.2)]' : 'theme-bg-input theme-border-medium theme-text-muted hover:theme-text-primary hover:theme-border-strong hover:bg-gray-500/5'
               }`}
           >
             {isPlaying ? <Pause size={20} className="animate-pulse" /> : <PlayCircle size={20} />}
@@ -74,9 +74,9 @@ export const AudioNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected })
           </button>
         </div>
       ) : (
-        <div className="flex-1 border border-dashed border-[#2a2a3a] rounded-xl flex flex-col items-center justify-center gap-3 opacity-50">
-          <Volume2 size={32} className="text-gray-800" />
-          <span className="text-[10px] text-gray-700 font-bold uppercase">已准备好合成语音</span>
+        <div className="flex-1 border border-dashed theme-border-medium rounded-xl flex flex-col items-center justify-center gap-3 opacity-50">
+          <Volume2 size={32} className="theme-text-disabled" />
+          <span className="text-[10px] theme-text-disabled font-bold uppercase">已准备好合成语音</span>
         </div>
       )}
     </BaseNode>

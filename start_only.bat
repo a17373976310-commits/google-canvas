@@ -5,6 +5,7 @@ title AI Infinite Canvas - Start Only
 cd /d "%~dp0"
 set "ROOT=%CD%"
 set "BACKEND_DIR=%ROOT%\backend"
+set "FRONTEND_PORT=5173"
 
 echo ========================================
 echo AI Infinite Canvas - Start Only
@@ -42,10 +43,10 @@ echo Starting backend in a new window...
 start "AI Canvas Backend" cmd /k "cd /d ""%BACKEND_DIR%"" && python main.py"
 
 echo Starting frontend in this window...
-echo Frontend: http://127.0.0.1:3000
+echo Frontend: http://127.0.0.1:%FRONTEND_PORT%
 echo Backend:  http://127.0.0.1:8000/health
 echo.
 
-npm run dev -- --host 127.0.0.1 --port 3000
+npm run dev -- --host 127.0.0.1 --port %FRONTEND_PORT%
 
 pause

@@ -75,6 +75,15 @@ def read_image_bytes(source: str) -> Tuple[bytes, str]:
     if not value:
         raise ValueError("Image source is empty")
 
+    if value.startswith("/history-assets/"):
+        file_name = urllib.parse.unquote(value.split("/history-assets/", 1)[1].split("?", 1)[0])
+        if "/" in file_name or "\\" in file_name or not file_name:
+            raise ValueError("Invalid history asset path")
+        asset_path = get_history_assets_dir() / file_name
+        if not asset_path.exists():
+            raise ValueError(f"History asset not found: {file_name}")
+        return asset_path.read_bytes(), detect_mime_type_from_source(file_name)
+
     if value.startswith("http://") or value.startswith("https://"):
         with urlopen_with_optional_timeout(value) as response:
             body = response.read()

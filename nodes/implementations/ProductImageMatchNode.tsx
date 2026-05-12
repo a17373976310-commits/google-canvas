@@ -1,5 +1,5 @@
 import React from 'react';
-import { Handle, Position, NodeProps } from 'reactflow';
+import { NodeProps } from 'reactflow';
 import { FileText, Filter, Images, Rows3 } from 'lucide-react';
 import { BaseNode } from '../BaseNode';
 import { NodeData, ProductImageCandidateAnalysis, ProductImageMatchOutput, StandardFilePayload, TaskSelectionTask } from '../../types';
@@ -124,53 +124,28 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
 
     return (
         <BaseNode id={id} data={data} icon={Filter} color="bg-sky-500" selected={selected}>
-            <div className="flex flex-col py-2">
-                <div className="relative flex items-center h-8 px-4 group/row">
-                    <Handle
-                        type="target"
-                        position={Position.Left}
-                        id="task"
-                        className={`!w-3 !h-3 !border-2 !border-[#0b0b0f] !left-[-7px] transition-colors ${data.inputs?.task ? '!bg-teal-500' : '!bg-[#2a2a3a] group-hover/row:!bg-teal-400'}`}
-                    />
-                    <div className="flex items-center gap-2 opacity-60 group-hover/row:opacity-100 transition-opacity">
-                        <Rows3 size={10} className="text-teal-400" />
-                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">任务对象</span>
-                    </div>
+            <div className="p-4 space-y-3 flex-1 overflow-hidden">
+                <div className="flex flex-wrap gap-1.5">
+                    <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[9px] font-semibold ${data.inputs?.task ? 'border-teal-500/25 bg-teal-500/10 text-teal-300' : 'theme-border-subtle theme-text-muted'}`}>
+                        <Rows3 size={10} />
+                        任务
+                    </span>
+                    <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[9px] font-semibold ${data.inputs?.prompt ? 'border-blue-500/25 bg-blue-500/10 text-blue-300' : 'theme-border-subtle theme-text-muted'}`}>
+                        <FileText size={10} />
+                        提示词
+                    </span>
+                    <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[9px] font-semibold ${candidateImages.length > 0 ? 'border-amber-500/25 bg-amber-500/10 text-amber-300' : 'theme-border-subtle theme-text-muted'}`}>
+                        <Images size={10} />
+                        候选图 {candidateImages.length || ''}
+                    </span>
                 </div>
-                <div className="relative flex items-center h-8 px-4 group/row">
-                    <Handle
-                        type="target"
-                        position={Position.Left}
-                        id="prompt"
-                        className={`!w-3 !h-3 !border-2 !border-[#0b0b0f] !left-[-7px] transition-colors ${data.inputs?.prompt ? '!bg-blue-500' : '!bg-[#2a2a3a] group-hover/row:!bg-blue-400'}`}
-                    />
-                    <div className="flex items-center gap-2 opacity-60 group-hover/row:opacity-100 transition-opacity">
-                        <FileText size={10} className="text-blue-400" />
-                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">提示词</span>
-                    </div>
-                </div>
-                <div className="relative flex items-center h-8 px-4 group/row">
-                    <Handle
-                        type="target"
-                        position={Position.Left}
-                        id="image"
-                        className={`!w-3 !h-3 !border-2 !border-[#0b0b0f] !left-[-7px] transition-colors ${candidateImages.length > 0 ? '!bg-amber-500' : '!bg-[#2a2a3a] group-hover/row:!bg-amber-400'}`}
-                    />
-                    <div className="flex items-center gap-2 opacity-60 group-hover/row:opacity-100 transition-opacity">
-                        <Images size={10} className="text-amber-400" />
-                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">候选产品图</span>
-                    </div>
-                </div>
-            </div>
-
-            <div className="px-4 pb-4 space-y-3 flex-1 overflow-hidden">
                 <div className="grid grid-cols-2 gap-2">
                     <label className="block space-y-1">
-                        <span className="text-[8px] font-black text-gray-500 uppercase tracking-widest">最多选图</span>
+                        <span className="text-[8px] font-black theme-text-muted uppercase tracking-widest">最多选图</span>
                         <input
                             type="text"
                             inputMode="numeric"
-                            className="w-full bg-[#0b0b0f] border border-[#2a2a3a] rounded-xl px-3 py-2 text-[11px] text-gray-300 focus:outline-none focus:border-sky-500/50"
+                            className="w-full theme-bg-input border theme-border-medium rounded-xl px-3 py-2 text-[11px] theme-text-primary focus:outline-none focus:border-sky-500/50"
                             value={String(maxSelections)}
                             onChange={(e) => {
                                 const nextValue = e.target.value.replace(/[^\d]/g, '');
@@ -184,8 +159,8 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
                         />
                     </label>
 
-                    <div className="rounded-2xl border border-[#2a2a3a] bg-[#0b0b0f] px-3 py-2 flex flex-col justify-center">
-                        <span className="text-[8px] font-black text-gray-500 uppercase tracking-widest">连接状态</span>
+                    <div className="rounded-2xl border theme-border-medium theme-bg-input px-3 py-2 flex flex-col justify-center">
+                        <span className="text-[8px] font-black theme-text-muted uppercase tracking-widest">连接状态</span>
                         <span className="text-[11px] text-sky-300 mt-1">
                             {candidateImages.length > 0 ? `${candidateImages.length} 张候选图` : '等待图片输入'}
                         </span>
@@ -193,25 +168,25 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
                 </div>
 
                 <label className="block space-y-1">
-                    <span className="text-[8px] font-black text-gray-500 uppercase tracking-widest">筛选附加说明</span>
+                    <span className="text-[8px] font-black theme-text-muted uppercase tracking-widest">筛选附加说明</span>
                     <textarea
-                        className="w-full bg-[#0b0b0f] border border-[#2a2a3a] rounded-xl px-3 py-2 text-[11px] text-gray-300 focus:outline-none focus:border-sky-500/50 h-20 resize-none"
+                        className="w-full theme-bg-input border theme-border-medium rounded-xl px-3 py-2 text-[11px] theme-text-primary focus:outline-none focus:border-sky-500/50 h-20 resize-none"
                         placeholder="例如：优先选白底主机图；配件任务优先选刷头特写。"
                         value={notes}
                         onChange={(e) => updateNodeData(id, { config: { ...data.config, matchNotes: e.target.value } })}
                     />
                 </label>
 
-                <div className="rounded-2xl border border-[#2a2a3a] bg-[#0b0b0f] p-3 space-y-2">
+                <div className="rounded-2xl border theme-border-medium theme-bg-input p-3 space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                        <span className="text-[9px] font-black uppercase tracking-widest text-gray-400">当前任务</span>
-                        <span className="text-[9px] text-gray-500">
+                        <span className="text-[9px] font-black uppercase tracking-widest theme-text-secondary">当前任务</span>
+                        <span className="text-[9px] theme-text-muted">
                             {selectedImages.length > 0
                                 ? `已选 ${selectedImages.length} 张 / 已分析 ${candidateAnalyses.length || candidateImages.length} 张`
                                 : '待运行'}
                         </span>
                     </div>
-                    <div className="text-[10px] text-gray-400 whitespace-pre-wrap break-all line-clamp-4">
+                    <div className="text-[10px] theme-text-secondary whitespace-pre-wrap break-all line-clamp-4">
                         {taskPreview || promptPreview || '请连接任务选择节点或提示词工程节点。'}
                     </div>
                     {output?.reason && (
@@ -220,16 +195,16 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
                         </div>
                     )}
                     {output?.selectedIndexes?.length ? (
-                        <div className="text-[9px] text-gray-500">
+                        <div className="text-[9px] theme-text-muted">
                             命中序号：{output.selectedIndexes.join('、')}
                         </div>
                     ) : null}
                 </div>
 
-                <div className="rounded-2xl border border-[#2a2a3a] bg-[#0b0b0f] p-3 min-h-[150px]">
+                <div className="rounded-2xl border theme-border-medium theme-bg-input p-3 min-h-[150px]">
                     <div className="flex items-center justify-between gap-2 mb-2">
-                        <span className="text-[9px] font-black uppercase tracking-widest text-gray-400">筛选结果</span>
-                        <span className="text-[9px] text-gray-500">
+                        <span className="text-[9px] font-black uppercase tracking-widest theme-text-secondary">筛选结果</span>
+                        <span className="text-[9px] theme-text-muted">
                             {selectedImages.length > 0 ? `${selectedImages.length}/${candidateImages.length}` : '暂无'}
                         </span>
                     </div>
@@ -242,7 +217,7 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
                                     return (
                                         <div
                                             key={`${id}-selected-${index}`}
-                                            className="relative aspect-square rounded-xl overflow-hidden border border-[#2a2a3a] bg-black"
+                                            className="relative aspect-square rounded-xl overflow-hidden border theme-border-medium bg-black"
                                         >
                                             {preview ? (
                                                 <img
@@ -251,7 +226,7 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
                                                     className="w-full h-full object-cover"
                                                 />
                                             ) : (
-                                                <div className="w-full h-full flex items-center justify-center text-[9px] text-gray-500">
+                                                <div className="w-full h-full flex items-center justify-center text-[9px] theme-text-muted">
                                                     无预览
                                                 </div>
                                             )}
@@ -267,16 +242,16 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
                                     {selectedAnalyses.slice(0, 3).map((analysis) => (
                                         <div
                                             key={`${id}-analysis-${analysis.index}`}
-                                            className="rounded-xl border border-[#2a2a3a] bg-[#06060a] px-3 py-2"
+                                            className="rounded-xl border theme-border-medium theme-bg-input px-3 py-2"
                                         >
                                             <div className="text-[9px] text-sky-300 font-black">
                                                 图 {analysis.index} · {analysis.primaryCategory || '未分类'}
                                             </div>
-                                            <div className="text-[10px] text-gray-400 mt-1 line-clamp-2">
+                                            <div className="text-[10px] theme-text-secondary mt-1 line-clamp-2">
                                                 {analysis.summaryZh || '暂无摘要'}
                                             </div>
                                             {(analysis.tags?.length || 0) > 0 && (
-                                                <div className="text-[9px] text-gray-500 mt-1 truncate">
+                                                <div className="text-[9px] theme-text-muted mt-1 truncate">
                                                     标签：{analysis.tags.join(' / ')}
                                                 </div>
                                             )}
@@ -286,39 +261,13 @@ export const ProductImageMatchNode: React.FC<NodeProps<NodeData>> = ({ id, data,
                             )}
                         </div>
                     ) : (
-                        <div className="h-[110px] rounded-xl border border-dashed border-[#2a2a3a] flex items-center justify-center text-[10px] text-gray-500 text-center px-4">
+                        <div className="h-[110px] rounded-xl border border-dashed theme-border-medium flex items-center justify-center text-[10px] theme-text-muted text-center px-4">
                             连接“多图上传”到左侧图片插槽，再连接“任务选择”或“智能对话”后运行。
                         </div>
                     )}
                 </div>
             </div>
 
-            <div className="border-t border-white/5 py-2">
-                <div className="relative flex items-center h-8 px-4 group/out">
-                    <div className="flex items-center gap-2 opacity-70 group-hover/out:opacity-100 transition-opacity">
-                        <Images size={10} className="text-amber-400" />
-                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">已选图片</span>
-                    </div>
-                    <Handle
-                        type="source"
-                        position={Position.Right}
-                        id="image"
-                        className="!w-3 !h-3 !bg-amber-500 !border-2 !border-[#0b0b0f] !right-[-7px]"
-                    />
-                </div>
-                <div className="relative flex items-center h-8 px-4 group/out">
-                    <div className="flex items-center gap-2 opacity-70 group-hover/out:opacity-100 transition-opacity">
-                        <Filter size={10} className="text-sky-400" />
-                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">匹配报告</span>
-                    </div>
-                    <Handle
-                        type="source"
-                        position={Position.Right}
-                        id="report"
-                        className="!w-3 !h-3 !bg-sky-500 !border-2 !border-[#0b0b0f] !right-[-7px]"
-                    />
-                </div>
-            </div>
         </BaseNode>
     );
 };

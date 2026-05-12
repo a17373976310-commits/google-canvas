@@ -2,11 +2,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactFlow, {
   Background,
-  Controls,
   MiniMap,
   Panel,
   ReactFlowProvider,
   BackgroundVariant,
+  ConnectionMode,
+  SelectionMode,
   useReactFlow // Added useReactFlow for onDrop fix
 } from 'reactflow';
 
@@ -21,13 +22,15 @@ import { NoticeStack } from './components/NoticeStack';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { QuickNodeMenu } from './components/QuickNodeMenu';
 import { CanvasAgentPanel } from './components/CanvasAgentPanel';
+import { SoftEdge } from './components/SoftEdge';
+import { ModelHub } from './components/ModelHub';
 import { InputNode, OutputNode, ChatNode, ImageNode, AudioNode, VideoNode, UploadImageNode, MultiImageUploadNode, GroupNode, FileUploadNode, TableParseNode, TaskSelectNode, BatchExecuteNode, ProductImageMatchNode } from './nodes';
 import { NodeType } from './types';
 import { fileToOptimizedImageDataUrl } from './utils/imageCompression';
+import { useTheme } from './hooks/useTheme';
+import { useCanvasMediaObserver } from './hooks/useCanvasMediaObserver';
 
 import {
-  Search,
-  Command,
   Maximize2,
   Trash2,
   Play,
@@ -39,19 +42,13 @@ import {
   Layout, // Added Layout icon
   Eye,
   RotateCcw,
-  FileText,
-  Image as ImageIcon,
-  Volume2,
-  Cpu,
   Layers,
-  Sparkles,
   History,
-  Video,
-  UploadCloud,
-  Bot
+  Bot,
+  Moon,
+  Sun,
+  X
 } from 'lucide-react';
-
-import { NODE_CATALOG } from './config/nodeCatalog';
 
 const Flow = () => {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
@@ -60,6 +57,7 @@ const Flow = () => {
   const [showWorkflowManager, setShowWorkflowManager] = useState(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [showCanvasAgent, setShowCanvasAgent] = useState(false);
+  const [showModelHub, setShowModelHub] = useState(false);
   const [quickNodeMenu, setQuickNodeMenu] = useState<{ open: boolean; x: number; y: number; clientX: number; clientY: number }>({
     open: false,
     x: 0,
@@ -68,12 +66,14 @@ const Flow = () => {
     clientY: 0,
   });
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
-  const [showMiniMap, setShowMiniMap] = useState(true);
+  const [showMiniMap, setShowMiniMap] = useState(false);
   const [isNodeDragging, setIsNodeDragging] = useState(false);
+  const [isInteracting, setIsInteracting] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [duplicateCount, setDuplicateCount] = useState('1');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
-  const searchInputRef = useRef<HTMLInputElement>(null);
+  const interactionTimerRef = useRef<number | null>(null);
+  const isInteractingRef = useRef(false);
+  const { resolvedTheme, toggleTheme, reactFlowTheme } = useTheme();
 
   // Expose lightbox globally for node previews
   (window as any).openLightbox = (src: string) => setLightboxImage(src);
@@ -95,13 +95,18 @@ const Flow = () => {
     [NodeType.GROUP]: GroupNode,
   }), []);
 
-  // Memoize defaultEdgeOptions
-  const defaultEdgeOptionsMemo = useMemo(() => ({
-    animated: true,
-    style: { strokeWidth: 4, stroke: '#4f46e5' }
+  const edgeTypesMemo = useMemo(() => ({
+    soft: SoftEdge,
   }), []);
 
-  // Expose toggle globally for Sidebar access
+  // Memoize defaultEdgeOptions
+  const defaultEdgeOptionsMemo = useMemo(() => ({
+    type: 'soft',
+    animated: false,
+    style: { strokeWidth: 1.5, stroke: reactFlowTheme.edge }
+  }), [reactFlowTheme.edge]);
+
+  // ModelHub still uses this to jump into provider configuration.
   (window as any).openApiSettings = () => setIsApiSettingsOpen(true);
   const {
     nodes,
@@ -131,88 +136,78 @@ const Flow = () => {
   } = useStore();
 
   const renderedEdges = useMemo(() => {
-    if (!isNodeDragging) return edges;
-    return edges.map((edge) => (
-      edge.animated
-        ? { ...edge, animated: false }
-        : edge
-    ));
-  }, [edges, isNodeDragging]);
+    return edges.map((edge) => ({
+      ...edge,
+      type: 'soft',
+      animated: false,
+      style: {
+        ...edge.style,
+        stroke: reactFlowTheme.edge,
+        strokeWidth: 1.5,
+      },
+    }));
+  }, [edges, reactFlowTheme.edge]);
 
-  const shouldShowMiniMap = showMiniMap && !isNodeDragging;
+  const isAutoPerformanceMode = nodes.length >= 45 || edges.length >= 70;
+  const shouldShowMiniMap = showMiniMap && !isNodeDragging && !isAutoPerformanceMode;
+  const mediaObserverScanKey = `${nodes.length}:${isInteracting ? 'interacting' : 'idle'}`;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const getViewportCenter = useCallback(() => {
-    const wrapperBounds = reactFlowWrapper.current?.getBoundingClientRect();
-    if (!wrapperBounds) return { x: 300, y: 300 };
-
-    return reactFlowInstance.project({
-      x: wrapperBounds.left + wrapperBounds.width / 2,
-      y: wrapperBounds.top + wrapperBounds.height / 2,
-    });
-  }, [reactFlowInstance]);
-
-  const addNodeToViewportCenter = useCallback((type: NodeType) => {
-    const selectedNode = nodes.find((node) => node.id === selectedNodeId);
-    const canAutoConnect = !!selectedNode && selectedNode.type !== NodeType.GROUP;
-
-    if (canAutoConnect && selectedNode) {
-      addNode(
-        type,
-        { x: selectedNode.position.x + 420, y: selectedNode.position.y },
-        selectedNode.id
-      );
-    } else {
-      const position = getViewportCenter();
-      addNode(type, position);
+  const endInteractionSoon = useCallback(() => {
+    if (interactionTimerRef.current !== null) {
+      window.clearTimeout(interactionTimerRef.current);
     }
-  }, [addNode, getViewportCenter, nodes, selectedNodeId]);
+    interactionTimerRef.current = window.setTimeout(() => {
+      isInteractingRef.current = false;
+      setIsInteracting(false);
+      interactionTimerRef.current = null;
+    }, 180);
+  }, []);
 
-  const createStarterFlow = useCallback((preset: 'text' | 'image' | 'multi-image') => {
-    const center = getViewportCenter();
-    const startX = center.x - 420;
-    const y = center.y - 40;
-
-    if (preset === 'text') {
-      const inputId = addNode(NodeType.INPUT, { x: startX, y });
-      const chatId = addNode(NodeType.AI_CHAT, { x: startX + 420, y }, inputId);
-      addNode(NodeType.OUTPUT, { x: startX + 840, y }, chatId);
+  const beginInteraction = useCallback(() => {
+    if (interactionTimerRef.current !== null) {
+      window.clearTimeout(interactionTimerRef.current);
     }
-
-    if (preset === 'image') {
-      const inputId = addNode(NodeType.INPUT, { x: startX, y });
-      const imageId = addNode(NodeType.AI_IMAGE, { x: startX + 420, y }, inputId);
-      addNode(NodeType.OUTPUT, { x: startX + 840, y }, imageId);
+    if (!isInteractingRef.current) {
+      isInteractingRef.current = true;
+      setIsInteracting(true);
     }
+    endInteractionSoon();
+  }, [endInteractionSoon]);
 
-    if (preset === 'multi-image') {
-      const uploadId = addNode(NodeType.MULTI_IMAGE_UPLOAD, { x: startX, y });
-      const imageId = addNode(NodeType.AI_IMAGE, { x: startX + 420, y }, uploadId);
-      addNode(NodeType.OUTPUT, { x: startX + 840, y }, imageId);
-    }
+  const handleCanvasMove = useCallback(() => {
+    beginInteraction();
+  }, [beginInteraction]);
 
-    setTimeout(() => {
-      reactFlowInstance.fitView({ duration: 450, padding: 0.2 });
-    }, 60);
-  }, [addNode, getViewportCenter, reactFlowInstance]);
-
-  const filteredSuggestions = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return [];
-    return NODE_CATALOG.filter(item =>
-      item.label.toLowerCase().includes(q) ||
-      item.keywords.some(k => k.includes(q))
-    );
-  }, [searchQuery]);
+  useCanvasMediaObserver({
+    enabled: nodes.length > 8,
+    rootRef: reactFlowWrapper,
+    scanKey: mediaObserverScanKey,
+  });
 
   useEffect(() => {
-    setActiveSuggestionIndex(0);
-  }, [searchQuery]);
+    return () => {
+      if (interactionTimerRef.current !== null) {
+        window.clearTimeout(interactionTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     void hydrateImageHistory();
   }, [hydrateImageHistory]);
+
+  useEffect(() => {
+    const hideSplash = (window as any).__AI_CANVAS_HIDE_SPLASH__;
+    if (typeof hideSplash !== 'function') return;
+
+    const firstFrame = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => hideSplash());
+    });
+
+    return () => window.cancelAnimationFrame(firstFrame);
+  }, []);
 
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
@@ -281,12 +276,6 @@ const Flow = () => {
       const active = document.activeElement as HTMLElement | null;
       const isTyping = !!active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
 
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      }
-
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault();
         executeWorkflow();
@@ -316,37 +305,6 @@ const Flow = () => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [clearAllSkipped, duplicateSelectionInCanvas, executeWorkflow, saveWorkflow, toggleSkipForSelection]);
-
-  const handleSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (filteredSuggestions.length === 0) return;
-
-    if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      setActiveSuggestionIndex((prev) => (prev + 1) % filteredSuggestions.length);
-      return;
-    }
-
-    if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      setActiveSuggestionIndex((prev) => (prev - 1 + filteredSuggestions.length) % filteredSuggestions.length);
-      return;
-    }
-
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      const pick = filteredSuggestions[activeSuggestionIndex] || filteredSuggestions[0];
-      if (pick) {
-        addNodeToViewportCenter(pick.type);
-        setSearchQuery('');
-      }
-      return;
-    }
-
-    if (event.key === 'Escape') {
-      setSearchQuery('');
-      searchInputRef.current?.blur();
-    }
-  };
 
   const handleExport = useCallback(() => {
     const data = JSON.stringify({ nodes, edges }, null, 2);
@@ -411,6 +369,7 @@ const Flow = () => {
 
   const onNodeClick = useCallback((_: any, node: any) => {
     setQuickNodeMenu((prev) => ({ ...prev, open: false }));
+    setShowModelHub(false);
     onSelectionChange(node.id);
   }, [onSelectionChange]);
 
@@ -460,59 +419,15 @@ const Flow = () => {
   }, [addNode, nodes, quickNodeMenu.clientX, quickNodeMenu.clientY, reactFlowInstance, selectedNodeId]);
 
   return (
-    <div className="flex h-full w-full bg-[#0b0b0f] text-white selection:bg-indigo-500/30 overflow-hidden">
-      <Sidebar />
+    <div className={`flex h-full w-full theme-bg-canvas theme-text-primary selection:bg-indigo-500/30 overflow-hidden canvas-app-shell ${isAutoPerformanceMode ? 'perf-mode' : ''} ${isInteracting ? 'interacting' : ''} ${isConnecting ? 'is-connecting' : ''}`}>
+      <Sidebar
+        isModelHubOpen={showModelHub}
+        onToggleModelHub={() => setShowModelHub((prev) => !prev)}
+        onOpenApiSettings={() => setIsApiSettingsOpen(true)}
+      />
 
       <div className="flex-1 relative overflow-hidden h-full" ref={reactFlowWrapper} onDoubleClick={onPaneDoubleClick}>
-        <div className="absolute top-4 left-4 md:top-8 md:left-8 z-20 flex items-center gap-4 max-w-[calc(100vw-32px)]">
-          <div className="relative flex items-center gap-3 bg-[#161621] border border-[#1e1e2d] px-4 md:px-5 py-2.5 md:py-3 rounded-2xl shadow-2xl focus-within:border-indigo-500/50 transition-all w-full md:w-auto">
-            <Search size={16} className="text-gray-500" />
-            <input
-              ref={searchInputRef}
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={handleSearchKeyDown}
-              placeholder="搜索并回车添加节点..."
-              className="bg-transparent border-none outline-none text-xs w-40 sm:w-56 text-gray-300 placeholder:text-gray-700"
-            />
-            <div className="flex items-center gap-1.5 bg-[#0b0b0f] px-2 py-1 rounded-lg border border-[#1e1e2d]">
-              <Command size={10} className="text-gray-600" />
-              <span className="text-[10px] font-bold text-gray-600 uppercase">K</span>
-            </div>
-
-            {filteredSuggestions.length > 0 && (
-              <div className="absolute top-[calc(100%+10px)] left-0 right-0 bg-[#12121a] border border-[#1e1e2d] rounded-2xl p-2 shadow-2xl z-30 max-h-72 overflow-y-auto custom-scrollbar">
-                {filteredSuggestions.map((item, index) => {
-                  const Icon = item.icon;
-                  const isActive = index === activeSuggestionIndex;
-                  return (
-                    <button
-                      key={item.type}
-                      onClick={() => {
-                        addNodeToViewportCenter(item.type);
-                        setSearchQuery('');
-                      }}
-                      className={`w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${isActive ? 'bg-indigo-500/15 border border-indigo-500/30' : 'hover:bg-white/5 border border-transparent'}`}
-                    >
-                      <div className={`p-2 rounded-lg ${isActive ? 'bg-indigo-500/20 text-indigo-300' : 'bg-black/30 text-gray-500'}`}>
-                        <Icon size={14} />
-                      </div>
-                      <div className="min-w-0">
-                        <p className={`text-xs font-bold ${isActive ? 'text-white' : 'text-gray-300'}`}>{item.label}</p>
-                        <p className="text-[9px] text-gray-600 mt-0.5">
-                          {selectedNodeId ? '回车添加并自动连线' : '回车快速添加到画布中心'}
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="absolute top-4 right-4 md:top-8 md:right-8 z-20 flex items-center gap-2 md:gap-3 max-w-[calc(100vw-32px)] flex-wrap justify-end">
+        <div className="canvas-toolbar absolute top-4 right-4 md:top-8 md:right-8 z-20 flex items-center gap-2 md:gap-3 max-w-[calc(100vw-96px)] flex-wrap justify-end">
           <input
             type="file"
             ref={fileInputRef}
@@ -536,35 +451,43 @@ const Flow = () => {
           </button>
           <button
             onClick={() => setShowWorkflowManager(!showWorkflowManager)}
-            className={`flex items-center gap-2 bg-[#161621] border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all shadow-xl group ${showWorkflowManager ? 'text-blue-400 border-blue-500/50 bg-blue-500/5' : 'text-gray-400 border-[#1e1e2d] hover:text-white hover:border-gray-500'}`}
+            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft group ${showWorkflowManager ? 'text-blue-400 border-blue-500/50 bg-blue-500/5' : 'theme-bg-secondary theme-text-secondary theme-border-subtle hover:theme-text-primary hover:theme-border-strong'}`}
           >
             <Database size={16} className={showWorkflowManager ? 'animate-pulse' : 'group-hover:scale-110 transition-transform'} />
             <span className="hidden sm:inline">工作流管理</span>
           </button>
           <button
             onClick={() => setShowHistoryDrawer((prev) => !prev)}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all shadow-xl ${showHistoryDrawer ? 'bg-indigo-500/10 border-indigo-500/40 text-indigo-300' : 'bg-[#161621] border-[#1e1e2d] text-gray-400 hover:text-white hover:border-gray-500'}`}
+            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showHistoryDrawer ? 'bg-indigo-500/10 border-indigo-500/40 text-indigo-300' : 'theme-bg-secondary theme-border-subtle theme-text-secondary hover:theme-text-primary hover:theme-border-strong'}`}
           >
             <History size={16} />
             <span className="hidden sm:inline">图像历史</span>
           </button>
           <button
             onClick={() => setShowCanvasAgent((prev) => !prev)}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all shadow-xl ${showCanvasAgent ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'bg-[#161621] border-[#1e1e2d] text-gray-400 hover:text-white hover:border-gray-500'}`}
+            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showCanvasAgent ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'theme-bg-secondary theme-border-subtle theme-text-secondary hover:theme-text-primary hover:theme-border-strong'}`}
           >
             <Bot size={16} />
             <span className="hidden sm:inline">画布智能体</span>
           </button>
           <button
+            onClick={toggleTheme}
+            className="flex items-center gap-2 theme-bg-secondary border theme-border-subtle theme-text-secondary px-3 md:px-4 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft hover:theme-text-primary hover:theme-border-strong"
+            title={resolvedTheme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+          >
+            {resolvedTheme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            <span className="hidden sm:inline">{resolvedTheme === 'dark' ? '亮色' : '暗色'}</span>
+          </button>
+          <button
             onClick={() => reactFlowInstance.fitView({ duration: 500, padding: 0.2 })}
-            className="flex items-center gap-2 bg-white text-black font-black text-xs px-3 md:px-6 py-2.5 md:py-3 rounded-2xl hover:bg-indigo-500 hover:text-white transition-all shadow-[0_10px_30px_rgba(255,255,255,0.1)] group"
+            className="flex items-center gap-2 theme-bg-elevated theme-text-primary border theme-border-subtle font-black text-xs px-3 md:px-6 py-2.5 md:py-3 rounded-2xl hover:bg-indigo-500 hover:text-white transition-all theme-shadow-soft group"
           >
             <Maximize2 size={16} className="group-hover:rotate-12 transition-transform" />
             <span className="hidden sm:inline">聚焦全图</span>
           </button>
           <button
             onClick={() => setShowMiniMap((prev) => !prev)}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all shadow-xl ${showMiniMap ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-[#161621] border-[#1e1e2d] text-gray-500 hover:text-gray-300 hover:border-gray-500'}`}
+            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showMiniMap ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'theme-bg-secondary theme-border-subtle theme-text-muted hover:theme-text-secondary hover:theme-border-strong'}`}
           >
             <Eye size={16} />
             <span className="hidden sm:inline">{showMiniMap ? '隐藏地图' : '显示地图'}</span>
@@ -577,8 +500,19 @@ const Flow = () => {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
-          onNodeDragStart={() => setIsNodeDragging(true)}
-          onNodeDragStop={() => setIsNodeDragging(false)}
+          onConnectStart={() => setIsConnecting(true)}
+          onConnectEnd={() => setIsConnecting(false)}
+          onNodeDragStart={() => {
+            setIsNodeDragging(true);
+            beginInteraction();
+          }}
+          onNodeDragStop={() => {
+            setIsNodeDragging(false);
+            endInteractionSoon();
+          }}
+          onMoveStart={beginInteraction}
+          onMove={handleCanvasMove}
+          onMoveEnd={endInteractionSoon}
           onEdgeDoubleClick={(_, edge) => {
             removeEdge(edge.id);
             pushNotice('info', '连线已断开');
@@ -589,146 +523,150 @@ const Flow = () => {
           onDrop={onDrop}
           onDragOver={onDragOver}
           nodeTypes={nodeTypesMemo}
+          edgeTypes={edgeTypesMemo}
           fitView
-          snapToGrid
-          snapGrid={[20, 20]}
           defaultEdgeOptions={defaultEdgeOptionsMemo}
           onlyRenderVisibleElements
+          minZoom={0.2}
+          maxZoom={2.5}
+          nodesDraggable
+          autoPanOnNodeDrag
+          nodeDragThreshold={1}
+          elevateNodesOnSelect
+          selectionOnDrag
+          selectNodesOnDrag
+          selectionMode={SelectionMode.Partial}
+          selectionKeyCode={['Shift', 'Control', 'Meta']}
+          connectionMode={ConnectionMode.Strict}
+          snapToGrid={false}
+          zoomOnDoubleClick={false}
         >
           <Background
-            variant={BackgroundVariant.Lines}
-            gap={40}
+            variant={BackgroundVariant.Dots}
+            gap={20}
             size={1}
-            color="#1a1a24"
+            color={reactFlowTheme.background}
           />
           {shouldShowMiniMap && (
             <MiniMap
               pannable
               zoomable
-              className="!bg-[#111118] !border !border-[#1e1e2d] !rounded-2xl !shadow-2xl !bottom-28 md:!bottom-32 !right-4 md:!right-8"
-              nodeStrokeColor="#4f46e5"
-              nodeColor="#1f1f2d"
-              maskColor="rgba(0, 0, 0, 0.4)"
+              className="canvas-minimap !rounded-2xl !bottom-28 md:!bottom-32 !right-4 md:!right-8"
+              nodeStrokeColor={reactFlowTheme.minimapStroke}
+              nodeColor={reactFlowTheme.minimapNode}
+              maskColor={reactFlowTheme.minimapMask}
             />
           )}
-          <Controls className="!bg-[#161621] !border-[#1e1e2d] !shadow-2xl !rounded-xl overflow-hidden" />
-          <Panel position="bottom-right" className="bg-[#161621] p-3 rounded-2xl border border-[#1e1e2d] mb-8 mr-8 flex gap-3 shadow-2xl">
-            <button
-              onClick={() => executeWorkflow()}
-              disabled={isWorkflowRunning}
-              className="p-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl transition-all hover:scale-110 active:scale-95 shadow-lg shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-              title="运行工作流"
-            >
-              <Play size={20} fill="currentColor" />
-            </button>
-            <button
-              onClick={() => requestStopWorkflow()}
-              disabled={!isWorkflowRunning}
-              className="p-3 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title="停止执行"
-            >
-              <Square size={20} fill="currentColor" />
-            </button>
-            <button
-              onClick={() => requestStopConcurrent()}
-              disabled={!isWorkflowRunning}
-              className="p-3 bg-orange-500/15 hover:bg-orange-500/25 text-orange-300 rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title={`停止并发队列（上限 ${maxWorkflowConcurrency}，不再调度新任务）`}
-            >
-              <span className="text-[10px] font-black">并发</span>
-            </button>
-            <div className="w-px bg-[#1e1e2d]" />
-            <div className="flex items-center gap-2 pr-1">
+          <Panel position="bottom-left" className="canvas-command-panel theme-bg-secondary border theme-border-subtle mb-8 ml-8 theme-shadow-panel backdrop-blur-xl">
+            <div className="canvas-command-group">
+              <button
+                type="button"
+                onClick={() => executeWorkflow()}
+                disabled={isWorkflowRunning}
+                className="canvas-command-button is-primary"
+                title="运行工作流"
+                aria-label="运行工作流"
+              >
+                <Play size={18} fill="currentColor" />
+              </button>
+              <button
+                type="button"
+                onClick={() => requestStopWorkflow()}
+                disabled={!isWorkflowRunning}
+                className="canvas-command-button is-danger"
+                title="停止执行"
+                aria-label="停止执行"
+              >
+                <Square size={15} fill="currentColor" />
+              </button>
+              <button
+                type="button"
+                onClick={() => requestStopConcurrent()}
+                disabled={!isWorkflowRunning}
+                className="canvas-command-button is-warning"
+                title={`停止并发队列，上限 ${maxWorkflowConcurrency}`}
+                aria-label="停止并发队列"
+              >
+                <Layers size={16} />
+              </button>
+            </div>
+
+            <div className="canvas-command-divider" />
+
+            <div className="canvas-duplicate-control">
               <input
                 type="number"
                 min={1}
                 max={30}
                 value={duplicateCount}
                 onChange={(e) => setDuplicateCount(e.target.value)}
-                className="w-14 bg-[#0f0f16] border border-[#2a2a3a] rounded-lg px-2 py-1 text-[10px] text-gray-300 outline-none focus:border-indigo-500/50"
+                className="canvas-duplicate-input"
                 title="复制份数"
+                aria-label="复制份数"
               />
               <button
+                type="button"
                 onClick={() => {
                   const parsed = Number.parseInt(duplicateCount, 10);
                   const count = Number.isFinite(parsed) ? Math.max(1, Math.min(30, parsed)) : 1;
                   duplicateSelectionInCanvas(count, { keepUploadData: false });
                 }}
-                className="p-3 bg-violet-500/20 hover:bg-violet-500/30 text-violet-300 rounded-xl transition-all"
+                className="canvas-command-button is-accent"
                 title="复制选中节点组 (Ctrl/Cmd + D)"
+                aria-label="复制选中节点组"
               >
-                <Copy size={18} />
+                <Copy size={16} />
               </button>
             </div>
-            <div className="w-px bg-[#1e1e2d]" />
+
+            <div className="canvas-command-divider" />
+
+            <div className="canvas-command-group">
+              <button
+                type="button"
+                onClick={() => toggleSkipForSelection()}
+                className="canvas-command-button is-skip"
+                title="跳过/恢复选中节点 (S)"
+                aria-label="跳过或恢复选中节点"
+              >
+                <span>S</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => clearAllSkipped()}
+                className="canvas-command-button is-restore"
+                title="恢复全部跳过节点 (Ctrl/Cmd+Shift+R)"
+                aria-label="恢复全部跳过节点"
+              >
+                <RotateCcw size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={() => tidyUp()}
+                className="canvas-command-button"
+                title="自动对齐整理"
+                aria-label="自动对齐整理"
+              >
+                <Layout size={17} />
+              </button>
+            </div>
+
+            <div className="canvas-command-divider" />
+
             <button
-              onClick={() => toggleSkipForSelection()}
-              className="p-3 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 rounded-xl transition-all"
-              title="跳过/恢复选中节点 (S)"
-            >
-              <span className="text-xs font-black">S</span>
-            </button>
-            <button
-              onClick={() => clearAllSkipped()}
-              className="p-3 hover:bg-cyan-500/10 text-cyan-300 rounded-xl transition-all"
-              title="恢复全部跳过节点 (Ctrl/Cmd+Shift+R)"
-            >
-              <RotateCcw size={18} />
-            </button>
-            <div className="w-px bg-[#1e1e2d]" />
-            <button
-              onClick={() => tidyUp()}
-              className="p-3 hover:bg-indigo-500/10 text-gray-400 hover:text-indigo-400 rounded-xl transition-all"
-              title="自动对齐整理"
-            >
-              <Layout size={20} />
-            </button>
-            <div className="w-px bg-[#1e1e2d]" />
-            <button
+              type="button"
               onClick={() => {
                 clearCanvas();
                 pushNotice('warn', '画布已清空');
               }}
-              className="p-3 hover:bg-rose-500/10 text-gray-500 hover:text-rose-400 rounded-xl transition-all"
+              className="canvas-command-button is-muted-danger"
               title="清空画布"
+              aria-label="清空画布"
             >
-              <Trash2 size={20} />
+              <Trash2 size={17} />
             </button>
           </Panel>
 
-          {nodes.length === 0 && (
-            <Panel position="bottom-left" className="mb-5 ml-4 md:mb-8 md:ml-8 max-w-[92vw] sm:max-w-sm bg-[#111118]/95 border border-[#1e1e2d] rounded-2xl p-4 shadow-2xl backdrop-blur-xl">
-              <p className="text-[11px] font-black text-indigo-300 uppercase tracking-wider">快速开始</p>
-              <p className="text-[11px] text-gray-400 mt-2 leading-relaxed">
-                1) 一键生成模板流程，或从左侧拖入节点
-              </p>
-              <p className="text-[11px] text-gray-400 leading-relaxed">
-                2) 连线后点击右下角运行按钮
-              </p>
-              <div className="grid grid-cols-1 gap-2 mt-3">
-                <button
-                  onClick={() => createStarterFlow('text')}
-                  className="w-full py-2.5 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 text-[10px] font-black tracking-wider uppercase hover:bg-indigo-500/25 transition-all"
-                >
-                  一键文本流程
-                </button>
-                <button
-                  onClick={() => createStarterFlow('image')}
-                  className="w-full py-2.5 rounded-xl bg-orange-500/15 border border-orange-500/30 text-orange-300 text-[10px] font-black tracking-wider uppercase hover:bg-orange-500/25 transition-all"
-                >
-                  一键绘图流程
-                </button>
-                <button
-                  onClick={() => createStarterFlow('multi-image')}
-                  className="w-full py-2.5 rounded-xl bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[10px] font-black tracking-wider uppercase hover:bg-cyan-500/25 transition-all"
-                >
-                  一键多图编辑
-                </button>
-              </div>
-              <p className="text-[10px] text-gray-600 mt-3">选中节点后再搜索添加，会自动连线到新节点</p>
-              <p className="text-[10px] text-gray-600 mt-1">快捷键：Ctrl/Cmd + K 搜索，Ctrl/Cmd + Enter 运行，Ctrl/Cmd + S 快速保存</p>
-            </Panel>
-          )}
         </ReactFlow>
         {/* Modal Overlay / Panels */}
         {showWorkflowManager && (
@@ -744,6 +682,26 @@ const Flow = () => {
           isOpen={showCanvasAgent}
           onClose={() => setShowCanvasAgent(false)}
         />
+
+        {showModelHub && (
+          <div className="canvas-model-drawer">
+            <div className="canvas-floating-panel-header">
+              <div>
+                <h2 className="text-sm font-black theme-text-primary">模型枢纽</h2>
+                <p className="text-[10px] theme-text-muted">拖动模型到节点，或点击批量应用</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowModelHub(false)}
+                className="canvas-floating-panel-close"
+                title="关闭模型枢纽"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <ModelHub />
+          </div>
+        )}
 
         <QuickNodeMenu
           isOpen={quickNodeMenu.open}

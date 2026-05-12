@@ -451,7 +451,7 @@ def extract_image_from_gemini_response(resp: Any) -> Optional[str]:
                     return found
 
     return None
-def normalize_generation_image_refs(images: List[str]) -> List[str]:
+def normalize_generation_image_refs(images: List[str], inline_remote_urls: bool = False) -> List[str]:
     refs: List[str] = []
     for raw in images:
         if not isinstance(raw, str):
@@ -463,6 +463,16 @@ def normalize_generation_image_refs(images: List[str]) -> List[str]:
         # Generations API expects url or b64_json strings. Convert data URLs to raw base64.
         if value.startswith("data:") and "," in value:
             value = value.split(",", 1)[1]
+        elif inline_remote_urls and (
+            value.startswith("http://")
+            or value.startswith("https://")
+            or value.startswith("/history-assets/")
+        ):
+            try:
+                image_bytes, _mime_type = read_image_bytes(value)
+                value = base64.b64encode(image_bytes).decode("ascii")
+            except Exception as image_err:
+                raise ValueError(f"参考图链接无法读取，请重新生成或重新上传这张图: {image_err}")
 
         refs.append(value)
     return refs
@@ -472,9 +482,9 @@ def decode_image_reference_to_bytes(image_ref: str) -> bytes:
     value = str(image_ref or "").strip()
     if not value:
         raise ValueError("empty image reference")
-    if value.startswith("http://") or value.startswith("https://"):
-        with urlopen_with_optional_timeout(value) as res:
-            return res.read()
+    if value.startswith("http://") or value.startswith("https://") or value.startswith("/history-assets/"):
+        image_bytes, _mime_type = read_image_bytes(value)
+        return image_bytes
 
     raw_image = value
     if raw_image.startswith("data:") and "," in raw_image:
@@ -1459,7 +1469,7 @@ def execute_node(request: ExecuteRequest):
                     image_params["size"] = "adaptive"
 
                 if actual_images:
-                    refs = normalize_generation_image_refs(actual_images)
+                    refs = normalize_generation_image_refs(actual_images, inline_remote_urls=True)
                     if len(refs) > 14:
                         print(f"DEBUG: Multi-image refs exceed 14, truncating to first 14 (got {len(refs)})")
                         refs = refs[:14]

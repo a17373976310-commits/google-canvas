@@ -48,35 +48,35 @@ export const TerminalOutput = () => {
     };
 
     return (
-        <div className={`fixed bottom-4 md:bottom-8 left-1/2 -translate-x-1/2 z-[100] transition-all duration-500 ease-out w-[calc(100vw-24px)] ${isExpanded ? 'max-w-[900px]' : 'max-w-[440px]'}`}>
-            <div className="bg-[#0b0b0f]/95 border border-[#1e1e2d] rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] backdrop-blur-xl overflow-hidden flex flex-col">
+        <div className={`canvas-terminal fixed bottom-4 left-1/2 z-[80] -translate-x-1/2 transition-all duration-300 ease-out max-w-[calc(100vw-128px)] ${isExpanded ? 'w-[720px]' : 'w-[340px]'}`}>
+            <div className="theme-bg-elevated border theme-border-subtle rounded-xl theme-shadow-panel backdrop-blur-xl overflow-hidden flex flex-col">
                 {/* Header */}
                 <div
-                    className="p-4 flex items-center justify-between cursor-pointer select-none border-b border-[#1e1e2d]"
+                    className={`px-3 py-2 flex min-h-10 items-center justify-between cursor-pointer select-none ${isExpanded ? 'border-b theme-border-subtle' : ''}`}
                     onClick={() => setIsExpanded(!isExpanded)}
                 >
-                    <div className="flex items-center gap-3">
-                        <div className={`p-1.5 rounded-lg ${logs.some(l => l.level === 'error') ? 'bg-rose-500/10 text-rose-500' : 'bg-indigo-500/10 text-indigo-400'}`}>
-                            <Terminal size={14} />
+                    <div className="flex min-w-0 items-center gap-2.5">
+                        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${logs.some(l => l.level === 'error') ? 'bg-rose-500/10 text-rose-500' : 'bg-indigo-500/10 text-indigo-500'}`}>
+                            <Terminal size={13} />
                         </div>
-                        <div className="flex flex-col">
-                            <span className="text-[10px] font-black text-white tracking-widest uppercase italic">工作流实时日志 (REAL-TIME LOGS)</span>
-                            <div className="flex items-center gap-1.5 mt-0.5">
-                                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                <span className="text-[8px] text-gray-500 font-bold uppercase tracking-tight">System Monitor Active • {logs.length} Entries</span>
+                        <div className="flex min-w-0 items-center gap-2">
+                            <span className="text-[11px] font-semibold theme-text-primary">运行日志</span>
+                            <div className="flex items-center gap-1.5">
+                                <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                <span className="text-[10px] theme-text-muted">{logs.length} 条</span>
                             </div>
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={(e) => { e.stopPropagation(); clearLogs(); }}
-                            className="p-2 hover:bg-rose-500/10 text-gray-600 hover:text-rose-400 transition-all rounded-xl"
+                            className="rounded-lg p-1.5 theme-text-muted transition-all hover:bg-rose-500/10 hover:text-rose-400"
                             title="清空日志"
                         >
-                            <Trash2 size={14} />
+                            <Trash2 size={13} />
                         </button>
-                        <div className="p-2 text-gray-500">
-                            {isExpanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                        <div className="p-1.5 theme-text-muted">
+                            {isExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
                         </div>
                     </div>
                 </div>
@@ -85,14 +85,14 @@ export const TerminalOutput = () => {
                 {isExpanded && (
                     <div className="animate-in slide-in-from-bottom-2 duration-300">
                         {/* Tabs */}
-                        <div className="flex items-center gap-1 px-4 py-2 bg-black/40 border-b border-[#1e1e2d]">
+                        <div className="flex items-center gap-1 border-b theme-border-subtle theme-bg-secondary px-3 py-2">
                             {(['all', 'info', 'success', 'warn', 'error', 'api'] as const).map(tab => (
                                 <button
                                     key={tab}
                                     onClick={() => setActiveTab(tab)}
-                                    className={`px-3 py-1.5 rounded-lg text-[9px] font-black tracking-tight transition-all uppercase ${activeTab === tab
-                                        ? 'bg-white/5 text-white border border-white/10'
-                                        : 'text-gray-600 hover:text-gray-400'
+                                    className={`rounded-md px-2.5 py-1.5 text-[9px] font-semibold transition-all ${activeTab === tab
+                                        ? 'bg-indigo-500/10 text-indigo-500 border border-indigo-500/20'
+                                        : 'theme-text-muted hover:theme-text-secondary'
                                         }`}
                                 >
                                     {levelLabels[tab]}
@@ -103,12 +103,12 @@ export const TerminalOutput = () => {
                         {/* List */}
                         <div
                             ref={scrollRef}
-                            className="h-[260px] md:h-[300px] overflow-y-auto p-4 pb-8 font-mono text-[11px] leading-6 custom-scrollbar space-y-2 bg-black/20"
+                            className="h-[240px] overflow-y-auto p-3 pb-6 font-mono text-[11px] leading-6 custom-scrollbar space-y-1 theme-bg-primary"
                         >
                             {filteredLogs.length > 0 ? (
                                 filteredLogs.map((log) => (
                                     <div key={log.id} className="group flex items-start gap-4 hover:bg-white/[0.02] -mx-4 px-4 py-1.5 transition-colors border-l-2 border-transparent hover:border-indigo-500/30">
-                                        <span className="shrink-0 text-gray-700 text-[9px] w-14 font-bold tabular-nums mt-0.5">{log.timestamp}</span>
+                                        <span className="shrink-0 theme-text-disabled text-[9px] w-14 font-bold tabular-nums mt-0.5">{log.timestamp}</span>
                                         <div className="flex items-start gap-3 flex-1 overflow-hidden">
                                             {/* Colored Dot Indicator */}
                                             <div className={`shrink-0 w-1.5 h-1.5 rounded-full mt-1.5 ${levelStyles[log.level]}`} />
@@ -120,10 +120,10 @@ export const TerminalOutput = () => {
                                                             {log.nodeLabel}
                                                         </span>
                                                     )}
-                                                    <span className={`break-all leading-relaxed ${log.level === 'error' ? 'text-rose-400' : log.level === 'success' ? 'text-emerald-400' : 'text-gray-300'}`}>
+                                                    <span className={`break-all leading-relaxed ${log.level === 'error' ? 'text-rose-400' : log.level === 'success' ? 'text-emerald-400' : 'theme-text-primary'}`}>
                                                         {log.message.split('->').map((part, i) => (
                                                             <React.Fragment key={i}>
-                                                                {i > 0 && <span className="text-gray-600 mx-1">→</span>}
+                                                                {i > 0 && <span className="theme-text-muted mx-1">→</span>}
                                                                 {part.includes('http') ? <span className="text-indigo-400/80 italic underline decoration-indigo-400/20 underline-offset-4">{part}</span> : part}
                                                             </React.Fragment>
                                                         ))}
@@ -142,18 +142,18 @@ export const TerminalOutput = () => {
                         </div>
 
                         {/* Footer Status */}
-                        <div className="p-3 px-6 bg-[#0b0b0f] border-t border-[#1e1e2d] flex items-center justify-between">
+                        <div className="border-t theme-border-subtle theme-bg-secondary px-4 py-2.5 flex items-center justify-between">
                             <div className="flex items-center gap-4">
                                 <div className="flex items-center gap-2">
                                     <ShieldCheck size={10} className="text-emerald-500" />
-                                    <span className="text-[8px] font-black text-gray-700 tracking-widest uppercase">Encrypted Connection</span>
+                                    <span className="text-[8px] font-black theme-text-disabled tracking-widest uppercase">Encrypted Connection</span>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    <Clock size={10} className="text-gray-700" />
-                                    <span className="text-[8px] font-black text-gray-700 tracking-widest uppercase">Lat: 24ms</span>
+                                    <Clock size={10} className="theme-text-disabled" />
+                                    <span className="text-[8px] font-black theme-text-disabled tracking-widest uppercase">Lat: 24ms</span>
                                 </div>
                             </div>
-                            <span className="text-[8px] font-black text-gray-800 tracking-[0.2em] uppercase italic underline underline-offset-4 cursor-pointer hover:text-indigo-400 transition-colors">Core Engine v2.5-Flash</span>
+                            <span className="text-[8px] font-black theme-text-disabled tracking-[0.2em] uppercase italic underline underline-offset-4 cursor-pointer hover:text-indigo-400 transition-colors">Core Engine v2.5-Flash</span>
                         </div>
                     </div>
                 )}

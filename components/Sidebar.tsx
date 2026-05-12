@@ -2,98 +2,232 @@ import React from 'react';
 import { NodeType } from '../types';
 import { useStore } from '../store';
 import {
-  Zap,
-  Layers,
-  Database,
-  Settings,
+  Boxes,
   ChevronRight,
+  Cpu,
+  Layers,
+  Search,
+  Settings,
+  X,
+  Zap,
 } from 'lucide-react';
-import { ModelHub } from './ModelHub';
-import { NODE_CATALOG } from '../config/nodeCatalog';
+import { NODE_CATALOG, NodeCatalogItem } from '../config/nodeCatalog';
 
-export const Sidebar = () => {
+const NODE_GROUPS: Array<{ title: string; types: NodeType[] }> = [
+  {
+    title: '输入与素材',
+    types: [
+      NodeType.INPUT,
+      NodeType.FILE_UPLOAD,
+      NodeType.IMAGE_UPLOAD,
+      NodeType.MULTI_IMAGE_UPLOAD,
+    ],
+  },
+  {
+    title: '任务编排',
+    types: [
+      NodeType.TABLE_PARSE,
+      NodeType.TASK_SELECT,
+      NodeType.BATCH_EXECUTE,
+      NodeType.PRODUCT_IMAGE_MATCH,
+    ],
+  },
+  {
+    title: 'AI 生成',
+    types: [
+      NodeType.AI_CHAT,
+      NodeType.AI_IMAGE,
+      NodeType.AI_AUDIO,
+      NodeType.AI_VIDEO,
+    ],
+  },
+  {
+    title: '输出与布局',
+    types: [NodeType.OUTPUT, NodeType.GROUP],
+  },
+];
+
+const FAVORITE_NODE_TYPES = [
+  NodeType.INPUT,
+  NodeType.FILE_UPLOAD,
+  NodeType.TABLE_PARSE,
+  NodeType.AI_CHAT,
+  NodeType.AI_IMAGE,
+  NodeType.OUTPUT,
+];
+
+interface SidebarProps {
+  isModelHubOpen?: boolean;
+  onToggleModelHub?: () => void;
+  onOpenApiSettings?: () => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({
+  isModelHubOpen = false,
+  onToggleModelHub,
+  onOpenApiSettings,
+}) => {
   const { addNode } = useStore();
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
+  const [query, setQuery] = React.useState('');
+
+  const catalogByType = React.useMemo(() => {
+    return new Map(NODE_CATALOG.map((node) => [node.type, node]));
+  }, []);
+
+  const filteredCatalog = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return NODE_CATALOG;
+    return NODE_CATALOG.filter((node) => (
+      node.label.toLowerCase().includes(q)
+      || node.desc.toLowerCase().includes(q)
+      || node.keywords.some((keyword) => keyword.toLowerCase().includes(q))
+    ));
+  }, [query]);
+
+  const filteredTypeSet = React.useMemo(() => (
+    new Set(filteredCatalog.map((node) => node.type))
+  ), [filteredCatalog]);
 
   const handleDragStart = (event: React.DragEvent, nodeType: NodeType) => {
     event.dataTransfer.setData('application/reactflow', nodeType);
     event.dataTransfer.effectAllowed = 'move';
   };
 
+  const addPaletteNode = (nodeType: NodeType) => {
+    addNode(nodeType, { x: 320, y: 240 });
+  };
+
   return (
-    <aside className="z-10 flex h-full w-80 flex-col overflow-hidden border-r border-[#1e1e2d] bg-[#0f0f15] font-sans shadow-2xl">
-      <div className="border-b border-[#1e1e2d] bg-gradient-to-b from-indigo-500/5 to-transparent p-8 pb-4">
-        <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-600 shadow-[0_0_30px_rgba(79,70,229,0.4)]">
-            <Zap className="fill-white text-white" size={24} />
-          </div>
-          <div>
-            <h1 className="leading-none text-xl font-black tracking-tight text-white">AI CANVAS</h1>
-            <p className="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-gray-600">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-              Neural Engine Ready
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="scrollbar-hide flex flex-1 flex-col space-y-10 overflow-y-auto px-6 py-4">
-        <div className="shrink-0">
-          <h3 className="mb-6 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-gray-500">
-            <Layers size={14} className="text-indigo-500" /> Components
-          </h3>
-          <div className="flex flex-col gap-4">
-            {NODE_CATALOG.map((node) => (
-              <div
-                key={node.type}
-                className="group scale-100 cursor-grab rounded-2xl border border-[#1e1e2d] bg-[#161621] p-5 shadow-xl transition-all hover:scale-[1.02] hover:border-indigo-500/30 hover:bg-[#1c1c2b] active:cursor-grabbing"
-                onDragStart={(event) => handleDragStart(event, node.type)}
-                draggable
-                onClick={() => addNode(node.type, { x: 300, y: 300 })}
-              >
-                <div className="flex items-center gap-5">
-                  <div className={`rounded-2xl bg-black/40 p-4 shadow-inner transition-all group-hover:bg-indigo-600 group-hover:text-white ${node.color}`}>
-                    <node.icon size={24} />
-                  </div>
-                  <div className="flex-1 overflow-hidden">
-                    <h3 className="text-sm font-black tracking-tight text-white transition-colors group-hover:text-indigo-400">
-                      {node.label}
-                    </h3>
-                    <p className="mt-1.5 text-[8px] font-medium uppercase tracking-widest leading-tight text-gray-500 opacity-70 transition-colors group-hover:text-gray-400">
-                      {node.desc}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex min-h-0 flex-1 flex-col">
-          <h3 className="mb-4 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-gray-500">
-            <Database size={14} className="text-indigo-500" /> Model Hub
-          </h3>
-          <div className="min-h-0 flex-1">
-            <ModelHub />
-          </div>
-        </div>
-      </div>
-
-      <div className="border-t border-[#1e1e2d] bg-[#0b0b0f] p-6">
+    <>
+      <aside className="canvas-sidebar z-30 flex h-full shrink-0 flex-col items-center border-r theme-border-subtle theme-bg-primary font-sans">
         <button
-          onClick={() => (window as any).openApiSettings()}
-          className="group flex w-full items-center justify-between rounded-2xl border border-[#1e1e2d] bg-[#161621] p-4 transition-all hover:bg-[#1c1c2b]"
+          type="button"
+          className="canvas-rail-logo mt-3 flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-[0_10px_24px_rgba(79,70,229,0.28)]"
+          title="AI Canvas"
+          onClick={() => setPaletteOpen((prev) => !prev)}
         >
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-indigo-500/10 p-2 text-indigo-400 transition-all group-hover:bg-indigo-500 group-hover:text-white">
-              <Settings size={16} />
-            </div>
-            <span className="text-xs font-black uppercase tracking-widest text-gray-400 group-hover:text-white">
-              API Settings
-            </span>
-          </div>
-          <ChevronRight size={14} className="text-gray-700 transition-transform group-hover:translate-x-1" />
+          <Zap className="fill-white" size={20} />
         </button>
+
+        <div className="mt-5 flex flex-col items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPaletteOpen((prev) => !prev)}
+            className={`canvas-rail-button ${paletteOpen ? 'is-active' : ''}`}
+            title="节点库"
+          >
+            <Layers size={18} />
+          </button>
+          <button
+            type="button"
+            onClick={() => onToggleModelHub?.()}
+            className={`canvas-rail-button ${isModelHubOpen ? 'is-active' : ''}`}
+            title="模型枢纽"
+          >
+            <Cpu size={18} />
+          </button>
+        </div>
+
+        <div className="canvas-rail-node-strip custom-scrollbar mt-5 flex flex-1 flex-col items-center gap-2 overflow-y-auto px-2">
+          {FAVORITE_NODE_TYPES
+            .map((type) => catalogByType.get(type))
+            .filter((node): node is NodeCatalogItem => !!node)
+            .map((node) => (
+            <button
+              key={node.type}
+              type="button"
+              draggable
+              onDragStart={(event) => handleDragStart(event, node.type)}
+              onClick={() => addPaletteNode(node.type)}
+              className={`canvas-rail-node ${node.color}`}
+              title={node.label}
+            >
+              <node.icon size={17} />
+            </button>
+          ))}
+        </div>
+
+        <div className="mb-3 flex flex-col items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onOpenApiSettings?.()}
+            className="canvas-rail-button"
+            title="API 设置"
+          >
+            <Settings size={18} />
+          </button>
+        </div>
+      </aside>
+
+      <div className={`canvas-palette-drawer ${paletteOpen ? 'is-open' : ''}`}>
+        <div className="canvas-palette-header">
+          <div className="flex items-center gap-3">
+            <div className="canvas-palette-mark">
+              <Boxes size={16} />
+            </div>
+            <div>
+              <h2 className="text-sm font-black theme-text-primary">节点库</h2>
+              <p className="text-[10px] font-medium theme-text-muted">拖入画布或点击添加</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(false)}
+            className="canvas-palette-close"
+            title="收起节点库"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="canvas-palette-search">
+          <Search size={14} className="theme-text-muted" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            className="w-full bg-transparent text-xs outline-none theme-text-primary theme-placeholder-muted"
+            placeholder="搜索节点..."
+          />
+        </div>
+
+        <div className="canvas-palette-list custom-scrollbar">
+          {NODE_GROUPS.map((group) => {
+            const nodes = group.types
+              .map((type) => catalogByType.get(type))
+              .filter((node): node is NodeCatalogItem => !!node && filteredTypeSet.has(node.type));
+
+            if (nodes.length === 0) return null;
+
+            return (
+              <section key={group.title} className="canvas-palette-section">
+                <div className="canvas-palette-section-title">{group.title}</div>
+                <div className="space-y-1.5">
+                  {nodes.map((node) => (
+                    <button
+                      key={node.type}
+                      type="button"
+                      draggable
+                      onDragStart={(event) => handleDragStart(event, node.type)}
+                      onClick={() => addPaletteNode(node.type)}
+                      className="canvas-palette-item"
+                    >
+                      <div className={`canvas-palette-icon ${node.color}`}>
+                        <node.icon size={16} />
+                      </div>
+                      <div className="min-w-0 flex-1 text-left">
+                        <div className="truncate text-[12px] font-bold theme-text-primary">{node.label}</div>
+                        <div className="truncate text-[10px] theme-text-muted">{node.desc}</div>
+                      </div>
+                      <ChevronRight size={14} className="theme-text-disabled opacity-0 transition-opacity group-hover:opacity-100" />
+                    </button>
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
       </div>
-    </aside>
+    </>
   );
 };

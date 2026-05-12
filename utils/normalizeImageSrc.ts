@@ -63,14 +63,14 @@ export function normalizeImageSrc(raw: unknown): string | null {
         if (obj.data && Array.isArray(obj.data)) {
             return normalizeImageSrc(obj.data);
         }
+        if (typeof obj.localCacheUrl === 'string' && obj.localCacheUrl.trim()) {
+            return normalizeImageSrc(obj.localCacheUrl);
+        }
         if (typeof obj.primaryUrl === 'string' && obj.primaryUrl.trim()) {
             return normalizeImageSrc(obj.primaryUrl);
         }
         if (Array.isArray(obj.urls) && obj.urls.length > 0) {
             return normalizeImageSrc(obj.urls[0]);
-        }
-        if (typeof obj.localCacheUrl === 'string' && obj.localCacheUrl.trim()) {
-            return normalizeImageSrc(obj.localCacheUrl);
         }
         if (obj.url) return normalizeImageSrc(obj.url);
         if (obj.b64_json) {
