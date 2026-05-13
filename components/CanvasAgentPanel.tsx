@@ -483,6 +483,120 @@ const confirmsPendingAction = (text: string) => /^(好|好的|可以|确认|执�
 const wantsRun = (text: string) => /(运行|执行|跑|生成|开始|run)/i.test(text);
 const wantsMany = (text: string) => /(全部|所有|批量|每个|一批|多个)/i.test(text);
 
+const DIRECT_IMAGE_KEYWORD_RE = /(?:\u751f\u56fe|\u51fa\u56fe|\u753b\u56fe|\u505a\u56fe|\u751f\u6210[\s\S]{0,12}\u56fe|\u56fe[\s\S]{0,12}\u751f\u6210|\u56fe\u50cf|\u56fe\u7247|\u4e3b\u56fe|\u7535\u5546|\u6dd8\u5b9d|image\s+generation|generate\s+(?:an?\s+)?image|text-to-image)/i;
+const DIRECT_RUN_CONFIRM_RE = /^(?:\u5f00\u59cb(?:\u5427)?|\u6267\u884c|\u7ee7\u7eed|\u751f\u6210|\u51fa\u56fe|\u53ef\u4ee5|\u597d(?:\u7684)?|ok|yes|run|start)$/i;
+const IMAGE_CONTEXT_RE = /(?:\u751f\u56fe|\u751f\u6210|\u51fa\u56fe|\u56fe\u50cf|\u56fe\u7247|\u4e3b\u56fe|\u7535\u5546|\u6dd8\u5b9d|AI_IMAGE|gpt-image|image)/i;
+
+const isDirectImageGenerationRequest = (userText: string, conversation: AgentMessage[]) => {
+  const text = userText.trim();
+  if (!text) return false;
+  if (DIRECT_IMAGE_KEYWORD_RE.test(text)) return true;
+  if (!DIRECT_RUN_CONFIRM_RE.test(text)) return false;
+  return IMAGE_CONTEXT_RE.test(conversation.slice(-8).map((message) => message.content).join('\n'));
+};
+
+const chooseImageAttachmentsForDirectRun = (userText: string, attachments: AgentAttachment[]) => {
+  const imageAttachments = attachments.filter((attachment) => attachment.kind === 'image');
+  if (imageAttachments.length <= 1) return imageAttachments;
+  const shouldUseMany = /(?:\u5168\u90e8|\u6240\u6709|\u8fd9\u4e9b|\u591a\u5f20|all|multi)/i.test(userText);
+  return shouldUseMany ? imageAttachments.slice(-4) : imageAttachments.slice(-1);
+};
+
+const inferDirectImageAspectRatio = (text: string) => {
+  const ratioMatch = text.match(/\b(\d{1,2})\s*[:：xX×]\s*(\d{1,2})\b/);
+  if (ratioMatch) return `${ratioMatch[1]}:${ratioMatch[2]}`;
+  if (/(?:\u4e3b\u56fe|\u767d\u5e95|\u6dd8\u5b9d|\u4e9a\u9a6c\u900a|square)/i.test(text)) return '1:1';
+  if (/(?:banner|\u6a2a\u5e45|\u957f\u56fe)/i.test(text)) return '21:9';
+  if (/(?:\u7ad6\u56fe|\u6d77\u62a5|poster)/i.test(text)) return '4:5';
+  return '1:1';
+};
+
+const inferDirectImageSize = (text: string) => (
+  /4\s*k/i.test(text) ? '4K' : '2K'
+);
+
+const buildDirectImagePrompt = (
+  userText: string,
+  conversation: AgentMessage[],
+  imageAttachments: AgentAttachment[]
+) => {
+  const previousUserNeed = conversation
+    .filter((message) => message.role === 'user' && !DIRECT_RUN_CONFIRM_RE.test(message.content.trim()))
+    .slice(-3)
+    .map((message) => message.content.trim())
+    .filter(Boolean)
+    .join('\n\n');
+  const recentPlan = conversation
+    .filter((message) => message.role === 'assistant' && IMAGE_CONTEXT_RE.test(message.content))
+    .slice(-2)
+    .map((message) => message.content.trim())
+    .filter(Boolean)
+    .join('\n\n');
+  const referenceNames = imageAttachments.map((attachment) => attachment.name).join(', ');
+
+  return [
+    'Create the requested commercial image according to the latest user intent and recent plan.',
+    referenceNames ? `Reference image attachments: ${referenceNames}. Use them as product/visual references.` : '',
+    'Preserve the real product identity from the reference image. Improve lighting, composition, material highlights, and ecommerce polish.',
+    'Do not add brand logos, platform logos, or misleading text unless the user explicitly requested them.',
+    userText ? `Current instruction: ${userText}` : '',
+    previousUserNeed ? `Earlier user requirements:\n${previousUserNeed}` : '',
+    recentPlan ? `Recent agent plan:\n${recentPlan}` : '',
+  ].filter(Boolean).join('\n\n');
+};
+
+const buildDirectImageGenerationActions = (
+  userText: string,
+  conversation: AgentMessage[],
+  attachments: AgentAttachment[],
+  imageModelId: string
+): CanvasAgentAction[] => {
+  if (!isDirectImageGenerationRequest(userText, conversation)) return [];
+
+  const contextText = conversation.slice(-8).map((message) => message.content).join('\n');
+  const imageAttachments = chooseImageAttachmentsForDirectRun(userText, attachments);
+  const prompt = buildDirectImagePrompt(userText, conversation, imageAttachments);
+  const config: Record<string, any> = {
+    prompt,
+    aspectRatio: inferDirectImageAspectRatio(`${userText}\n${contextText}`),
+    imageSize: inferDirectImageSize(`${userText}\n${contextText}`),
+    promptTemplate: 'free_mode',
+    enablePromptTemplate: false,
+  };
+
+  if (imageModelId) {
+    config.modelId = imageModelId;
+  }
+
+  const actions: CanvasAgentAction[] = [];
+  if (imageAttachments.length > 0) {
+    actions.push({
+      type: 'attach_file_to_canvas',
+      attachmentId: imageAttachments.length === 1 ? imageAttachments[0].id : undefined,
+      attachmentIds: imageAttachments.length > 1 ? imageAttachments.map((attachment) => attachment.id) : undefined,
+      reason: 'Use the uploaded image attachment as the generation reference.',
+    });
+  }
+
+  actions.push({
+    type: 'create_node',
+    nodeType: NodeType.AI_IMAGE,
+    connectFromId: imageAttachments.length > 0 ? 'last_created' : undefined,
+    targetHandle: imageAttachments.length > 0 ? 'image' : undefined,
+    label: '\u667a\u80fd\u4f53\u751f\u56fe',
+    config,
+    reason: 'Create one image generation node for the requested output.',
+  });
+
+  actions.push({
+    type: 'run_node',
+    nodeId: 'last_created',
+    reason: 'The user asked to start generation now.',
+  });
+
+  return actions;
+};
+
 const resolveCanvasNodeType = (value?: string): NodeType | null => {
   const raw = String(value || '').trim();
   const normalized = raw.toUpperCase().replace(/[\s-]+/g, '_');
@@ -585,6 +699,9 @@ const summarizeAction = (action: CanvasAgentAction) => {
 
 const buildAgentSystemPrompt = () => [
   '# Canvas Agent Skill v1',
+  'CRITICAL: If the user asks to generate an image, make a product image, start generation, or says start/continue after an image plan, return executable actions. Do not only reply in prose.',
+  'For one image generation with attachments, use: attach_file_to_canvas -> create_node AI_IMAGE with prompt/modelId/aspectRatio/imageSize -> run_node last_created.',
+  'For one text-to-image generation without attachments, use: create_node AI_IMAGE with prompt/modelId/aspectRatio/imageSize -> run_node last_created.',
   '',
   '你是 AI Canvas 的画布操作智能体。你的职责不是聊天陪跑，而是把用户的自然语言意图转成安全、可验证、可执行的画布 actions。',
   '你像 Claude Code 一样工作：你负责判断、规划、选择工具；前端负责真正执行画布工具，并把 toolResults 回传给你。',
@@ -828,7 +945,13 @@ const actionIcon = (type: CanvasAgentActionType) => {
   return Sparkles;
 };
 
-export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isOpen, onClose }) => {
+interface CanvasAgentPanelProps {
+  isOpen: boolean;
+  onClose: () => void;
+  dockMode?: boolean;
+}
+
+export const CanvasAgentPanel: React.FC<CanvasAgentPanelProps> = ({ isOpen, onClose, dockMode = false }) => {
   const {
     nodes,
     edges,
@@ -1462,6 +1585,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
           continue;
         }
 
+        createdNodeIds.push(...createdIds);
         results.push({
           tool: action.type,
           ok: true,
@@ -1591,6 +1715,16 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
     if (actions.filter((action) => action.type === 'create_node').length > 3) return true;
     if (writeActions.length > 4) return true;
     if (runActions.length > 1) return true;
+    const isSimpleDirectImageRun = runActions.length === 1
+      && actions.some((action) => action.type === 'create_node' && resolveCanvasNodeType(action.nodeType) === NodeType.AI_IMAGE)
+      && actions.every((action) => (
+        action.type === 'attach_file_to_canvas'
+        || action.type === 'create_node'
+        || action.type === 'connect_nodes'
+        || action.type === 'run_node'
+      ))
+      && (DIRECT_IMAGE_KEYWORD_RE.test(userText) || DIRECT_RUN_CONFIRM_RE.test(userText));
+    if (isSimpleDirectImageRun) return false;
     if (runActions.length > 0 && writeActions.length > 0) return true;
     if (actions.some((action) => action.type === 'attach_file_to_canvas' && (
       (action.attachmentIds?.length || 0) > 1
@@ -1705,6 +1839,19 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
       }
 
       if (actions.length === 0) {
+        const fallbackActions = toolResults.length === 0
+          ? buildDirectImageGenerationActions(userText, conversation, attachments, imageModelId)
+          : [];
+
+        if (fallbackActions.length > 0) {
+          appendMessage({ role: 'assistant', content: '我把这一步直接落到画布执行：创建参考图节点和图像生成节点，然后开始运行。' });
+          const fallbackResults = await executeCanvasActions(fallbackActions);
+          if (stopRequestedRef.current) return;
+          appendMessage({
+            role: 'assistant',
+            content: summarizeToolResultsForUser(fallbackResults),
+          });
+        }
         return;
       }
 
@@ -1730,7 +1877,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
     }
 
     appendMessage({ role: 'assistant', content: '我已经完成最多 4 轮画布工具调用，先停在这里避免误操作。' });
-  }, [appendMessage, callAgentModel, executeCanvasActions, shouldConfirmActions]);
+  }, [appendMessage, attachments, callAgentModel, executeCanvasActions, imageModelId, shouldConfirmActions]);
 
   const confirmPendingActions = useCallback(async () => {
     if (!pendingRequest || isThinking) return;
@@ -1844,7 +1991,7 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
   if (!isOpen) return null;
 
   return (
-    <aside className="absolute right-4 top-16 bottom-16 z-30 flex w-[540px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-xl border theme-border-subtle theme-bg-overlay theme-shadow-panel backdrop-blur-xl">
+    <aside className={`${dockMode ? 'canvas-agent-panel canvas-agent-panel-dock' : 'absolute right-4 top-16 bottom-16 z-30 w-[540px] max-w-[calc(100vw-24px)] rounded-xl border theme-border-subtle theme-bg-overlay theme-shadow-panel backdrop-blur-xl'} flex flex-col overflow-hidden`}>
       <div className="flex items-center justify-between border-b theme-border-subtle theme-bg-secondary px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border theme-border-subtle theme-bg-tertiary text-cyan-500">
@@ -1873,14 +2020,16 @@ export const CanvasAgentPanel: React.FC<{ isOpen: boolean; onClose: () => void }
               <Trash2 size={15} />
             </button>
           )}
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg p-2 theme-text-muted transition hover:theme-bg-tertiary hover:theme-text-primary"
-            title="关闭"
-          >
-            <X size={16} />
-          </button>
+          {!dockMode && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg p-2 theme-text-muted transition hover:theme-bg-tertiary hover:theme-text-primary"
+              title="关闭"
+            >
+              <X size={16} />
+            </button>
+          )}
         </div>
       </div>
 

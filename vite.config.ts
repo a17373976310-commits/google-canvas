@@ -4,6 +4,12 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    const requestedEdition = (env.VITE_APP_EDITION || '').toLowerCase();
+    const appEdition = requestedEdition || (mode === 'development' ? 'admin' : 'client');
+    const licenseAdminPanelPath = appEdition === 'admin'
+      ? path.resolve(__dirname, 'components/LicenseAdminPanel.tsx')
+      : path.resolve(__dirname, 'components/LicenseAdminPanel.stub.tsx');
+
     return {
       server: {
         port: 5173,
@@ -43,6 +49,7 @@ export default defineConfig(({ mode }) => {
       },
       resolve: {
         alias: {
+          '@/components/LicenseAdminPanel': licenseAdminPanelPath,
           '@': path.resolve(__dirname, '.'),
         }
       }

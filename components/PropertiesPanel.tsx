@@ -8,7 +8,12 @@ import { X, Settings2, Sliders, Type, Info, Copy, Check, Eye, EyeOff, Maximize2,
 import { verifyVaultPassword } from '../config/security';
 import { getModelCapabilities } from '../config/modelCapabilities';
 
-export const PropertiesPanel = () => {
+interface PropertiesPanelProps {
+  dockMode?: boolean;
+  onClose?: () => void;
+}
+
+export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ dockMode = false, onClose }) => {
   const { nodes, selectedNodeId, updateNodeData, onSelectionChange, applyPromptTemplateToNode, isPromptVaultUnlocked, setPromptVaultUnlocked, pushNotice, apiProviders, activeProviderId, activeProviderIds } = useStore();
   const [copied, setCopied] = React.useState(false);
   const [showUnlockModal, setShowUnlockModal] = React.useState(false);
@@ -103,8 +108,16 @@ export const PropertiesPanel = () => {
     });
   };
 
+  const handleClose = () => {
+    if (onClose) {
+      onClose();
+      return;
+    }
+    onSelectionChange(null);
+  };
+
   return (
-    <div className="canvas-properties-panel w-80 theme-bg-primary border theme-border-subtle flex flex-col h-full z-10 theme-shadow-panel animate-in slide-in-from-right duration-300">
+    <div className={`${dockMode ? 'canvas-properties-panel canvas-properties-panel-dock' : 'canvas-properties-panel w-80'} theme-bg-primary border theme-border-subtle flex flex-col h-full z-10 theme-shadow-panel animate-in slide-in-from-right duration-300`}>
       <div className="flex items-center justify-between p-6 shrink-0 border-b theme-border-subtle theme-bg-secondary">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-xl bg-gradient-to-br from-indigo-500/20 to-blue-500/10 text-indigo-400 transition-all">
@@ -130,12 +143,14 @@ export const PropertiesPanel = () => {
               <Play size={14} fill="currentColor" />
             </button>
           )}
-          <button
-            onClick={() => onSelectionChange(null)}
-            className="p-2 hover:theme-bg-tertiary rounded-lg theme-text-muted hover:theme-text-primary transition-all"
-          >
-            <X size={18} />
-          </button>
+          {!dockMode && (
+            <button
+              onClick={handleClose}
+              className="p-2 hover:theme-bg-tertiary rounded-lg theme-text-muted hover:theme-text-primary transition-all"
+            >
+              <X size={18} />
+            </button>
+          )}
         </div>
       </div>
 

@@ -4,6 +4,9 @@ interface ImportMetaEnv {
   readonly VITE_BACKEND_URL?: string;
   readonly VITE_DEV_MODE_PASSWORD?: string;
   readonly VITE_NODE_VAULT_PASSWORD?: string;
+  readonly VITE_APP_EDITION?: 'admin' | 'client';
+  readonly VITE_LICENSE_SERVER_URL?: string;
+  readonly VITE_APP_VERSION?: string;
 }
 
 interface ImportMeta {

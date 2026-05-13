@@ -24,6 +24,7 @@ import { QuickNodeMenu } from './components/QuickNodeMenu';
 import { CanvasAgentPanel } from './components/CanvasAgentPanel';
 import { SoftEdge } from './components/SoftEdge';
 import { ModelHub } from './components/ModelHub';
+import { LicenseGate } from './components/LicenseGate';
 import { InputNode, OutputNode, ChatNode, ImageNode, AudioNode, VideoNode, UploadImageNode, MultiImageUploadNode, GroupNode, FileUploadNode, TableParseNode, TaskSelectNode, BatchExecuteNode, ProductImageMatchNode } from './nodes';
 import { NodeType } from './types';
 import { fileToOptimizedImageDataUrl } from './utils/imageCompression';
@@ -45,10 +46,19 @@ import {
   Layers,
   History,
   Bot,
+  Settings2,
   Moon,
   Sun,
   X
 } from 'lucide-react';
+
+type RightDockTab = 'properties' | 'agent';
+
+const requestedAppEdition = (import.meta.env.VITE_APP_EDITION || '').toLowerCase();
+const shouldLoadLicenseAdmin = requestedAppEdition === 'admin' || (!requestedAppEdition && import.meta.env.DEV);
+const LicenseAdminPanel = shouldLoadLicenseAdmin
+  ? React.lazy(() => import('@/components/LicenseAdminPanel').then((module) => ({ default: module.LicenseAdminPanel })))
+  : null;
 
 const Flow = () => {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
@@ -58,6 +68,8 @@ const Flow = () => {
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [showCanvasAgent, setShowCanvasAgent] = useState(false);
   const [showModelHub, setShowModelHub] = useState(false);
+  const [showLicenseAdmin, setShowLicenseAdmin] = useState(false);
+  const [rightDockTab, setRightDockTab] = useState<RightDockTab>('properties');
   const [quickNodeMenu, setQuickNodeMenu] = useState<{ open: boolean; x: number; y: number; clientX: number; clientY: number }>({
     open: false,
     x: 0,
@@ -135,6 +147,13 @@ const Flow = () => {
     clearAllSkipped
   } = useStore();
 
+  const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId) || null, [nodes, selectedNodeId]);
+  const hasSelectedNode = Boolean(selectedNode);
+  const isRightDockOpen = showCanvasAgent || hasSelectedNode;
+  const activeRightDockTab: RightDockTab = rightDockTab === 'properties' && !hasSelectedNode && showCanvasAgent
+    ? 'agent'
+    : rightDockTab;
+
   const renderedEdges = useMemo(() => {
     return edges.map((edge) => ({
       ...edge,
@@ -153,6 +172,36 @@ const Flow = () => {
   const mediaObserverScanKey = `${nodes.length}:${isInteracting ? 'interacting' : 'idle'}`;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (selectedNode && !showCanvasAgent) {
+      setRightDockTab('properties');
+    }
+  }, [selectedNode?.id, showCanvasAgent]);
+
+  const openAgentDock = useCallback(() => {
+    setShowCanvasAgent(true);
+    setRightDockTab('agent');
+  }, []);
+
+  const toggleAgentDock = useCallback(() => {
+    setShowCanvasAgent((current) => {
+      const next = !current;
+      setRightDockTab(next ? 'agent' : 'properties');
+      return next;
+    });
+  }, []);
+
+  const closeRightDock = useCallback(() => {
+    if (activeRightDockTab === 'agent') {
+      setShowCanvasAgent(false);
+      if (hasSelectedNode) {
+        setRightDockTab('properties');
+      }
+      return;
+    }
+    onSelectionChange(null);
+  }, [activeRightDockTab, hasSelectedNode, onSelectionChange]);
 
   const endInteractionSoon = useCallback(() => {
     if (interactionTimerRef.current !== null) {
@@ -419,10 +468,13 @@ const Flow = () => {
   }, [addNode, nodes, quickNodeMenu.clientX, quickNodeMenu.clientY, reactFlowInstance, selectedNodeId]);
 
   return (
-    <div className={`flex h-full w-full theme-bg-canvas theme-text-primary selection:bg-indigo-500/30 overflow-hidden canvas-app-shell ${isAutoPerformanceMode ? 'perf-mode' : ''} ${isInteracting ? 'interacting' : ''} ${isConnecting ? 'is-connecting' : ''}`}>
+    <div className={`flex h-full w-full theme-bg-canvas theme-text-primary selection:bg-indigo-500/30 overflow-hidden canvas-app-shell ${isAutoPerformanceMode ? 'perf-mode' : ''} ${isInteracting ? 'interacting' : ''} ${isConnecting ? 'is-connecting' : ''} ${isRightDockOpen ? 'has-right-dock' : ''}`}>
       <Sidebar
         isModelHubOpen={showModelHub}
+        isLicenseAdminOpen={showLicenseAdmin}
+        showLicenseAdmin={shouldLoadLicenseAdmin}
         onToggleModelHub={() => setShowModelHub((prev) => !prev)}
+        onToggleLicenseAdmin={() => setShowLicenseAdmin((prev) => !prev)}
         onOpenApiSettings={() => setIsApiSettingsOpen(true)}
       />
 
@@ -464,8 +516,8 @@ const Flow = () => {
             <span className="hidden sm:inline">图像历史</span>
           </button>
           <button
-            onClick={() => setShowCanvasAgent((prev) => !prev)}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showCanvasAgent ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'theme-bg-secondary theme-border-subtle theme-text-secondary hover:theme-text-primary hover:theme-border-strong'}`}
+            onClick={toggleAgentDock}
+            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showCanvasAgent && activeRightDockTab === 'agent' ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'theme-bg-secondary theme-border-subtle theme-text-secondary hover:theme-text-primary hover:theme-border-strong'}`}
           >
             <Bot size={16} />
             <span className="hidden sm:inline">画布智能体</span>
@@ -678,10 +730,65 @@ const Flow = () => {
           onClose={() => setShowHistoryDrawer(false)}
         />
 
-        <CanvasAgentPanel
-          isOpen={showCanvasAgent}
-          onClose={() => setShowCanvasAgent(false)}
-        />
+        {isRightDockOpen && (
+          <aside className="canvas-right-dock">
+            <div className="canvas-right-dock-tabs">
+              {hasSelectedNode && (
+                <button
+                  type="button"
+                  onClick={() => setRightDockTab('properties')}
+                  className={`canvas-right-dock-tab ${activeRightDockTab === 'properties' ? 'is-active' : ''}`}
+                >
+                  <Settings2 size={14} />
+                  节点属性
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={openAgentDock}
+                className={`canvas-right-dock-tab ${activeRightDockTab === 'agent' ? 'is-active' : ''}`}
+              >
+                <Bot size={14} />
+                画布智能体
+              </button>
+              <button
+                type="button"
+                onClick={closeRightDock}
+                className="canvas-right-dock-close"
+                title="关闭右侧面板"
+                aria-label="关闭右侧面板"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <div className="canvas-right-dock-body">
+              {hasSelectedNode && (
+                <div className={`canvas-right-dock-pane ${activeRightDockTab === 'properties' ? 'is-active' : ''}`}>
+                  <PropertiesPanel dockMode onClose={() => onSelectionChange(null)} />
+                </div>
+              )}
+              <div className={`canvas-right-dock-pane ${activeRightDockTab === 'agent' ? 'is-active' : ''}`}>
+                <CanvasAgentPanel
+                  isOpen={activeRightDockTab === 'agent'}
+                  onClose={() => {
+                    setShowCanvasAgent(false);
+                    if (hasSelectedNode) {
+                      setRightDockTab('properties');
+                    }
+                  }}
+                  dockMode
+                />
+              </div>
+            </div>
+          </aside>
+        )}
+
+        {shouldLoadLicenseAdmin && showLicenseAdmin && LicenseAdminPanel && (
+          <React.Suspense fallback={<div className="license-admin-drawer" />}>
+            <LicenseAdminPanel onClose={() => setShowLicenseAdmin(false)} />
+          </React.Suspense>
+        )}
 
         {showModelHub && (
           <div className="canvas-model-drawer">
@@ -722,7 +829,6 @@ const Flow = () => {
         )}
       </div>
 
-      <PropertiesPanel />
       <ApiSettingsModal isOpen={isApiSettingsOpen} onClose={() => setIsApiSettingsOpen(false)} />
     </div>
   );
@@ -730,8 +836,10 @@ const Flow = () => {
 
 export default function App() {
   return (
-    <ReactFlowProvider>
-      <Flow />
-    </ReactFlowProvider>
+    <LicenseGate>
+      <ReactFlowProvider>
+        <Flow />
+      </ReactFlowProvider>
+    </LicenseGate>
   );
 }

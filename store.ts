@@ -18,6 +18,7 @@ import { getModelCapabilities } from './config/modelCapabilities';
 import { inferConnectionHandles } from './config/nodeSpecs';
 import { normalizeImageSrc } from './utils/normalizeImageSrc';
 import { DEFAULT_CHAT_PROMPT_TEMPLATE } from './config/promptTemplates';
+import { ensureClientLicenseFresh } from './services/licenseClientApi';
 
 let stopExecutionRequested = false;
 const activeNodeAbortControllers = new Map<string, AbortController>();
@@ -6234,6 +6235,14 @@ export const useStore = create<CanvasState>((set, get) => ({
   },
 
   executeWorkflow: async () => {
+    try {
+      await ensureClientLicenseFresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'License verification failed.';
+      get().addLog('error', message);
+      get().pushNotice('error', message);
+      return;
+    }
     stopExecutionRequested = false;
     stopAllNodeProgress();
     set({ isWorkflowRunning: true });
@@ -6868,6 +6877,15 @@ export const useStore = create<CanvasState>((set, get) => ({
   executeSingleNode: async (id: string) => {
     const node = get().nodes.find(n => n.id === id);
     if (!node) return;
+
+    try {
+      await ensureClientLicenseFresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'License verification failed.';
+      get().addLog('error', message);
+      get().pushNotice('error', message);
+      return;
+    }
 
     if (node.data.status === 'running') {
       get().addLog('warn', `Node [${node.data.label}] is already running.`);

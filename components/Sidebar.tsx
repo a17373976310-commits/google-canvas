@@ -8,6 +8,7 @@ import {
   Layers,
   Search,
   Settings,
+  ShieldCheck,
   X,
   Zap,
 } from 'lucide-react';
@@ -58,13 +59,19 @@ const FAVORITE_NODE_TYPES = [
 
 interface SidebarProps {
   isModelHubOpen?: boolean;
+  isLicenseAdminOpen?: boolean;
+  showLicenseAdmin?: boolean;
   onToggleModelHub?: () => void;
+  onToggleLicenseAdmin?: () => void;
   onOpenApiSettings?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   isModelHubOpen = false,
+  isLicenseAdminOpen = false,
+  showLicenseAdmin = false,
   onToggleModelHub,
+  onToggleLicenseAdmin,
   onOpenApiSettings,
 }) => {
   const { addNode } = useStore();
@@ -127,6 +134,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <Cpu size={18} />
           </button>
+          {showLicenseAdmin && (
+            <button
+              type="button"
+              onClick={() => onToggleLicenseAdmin?.()}
+              className={`canvas-rail-button ${isLicenseAdminOpen ? 'is-active' : ''}`}
+              title="用户控制台"
+            >
+              <ShieldCheck size={18} />
+            </button>
+          )}
         </div>
 
         <div className="canvas-rail-node-strip custom-scrollbar mt-5 flex flex-1 flex-col items-center gap-2 overflow-y-auto px-2">
