@@ -700,8 +700,8 @@ const summarizeAction = (action: CanvasAgentAction) => {
 const buildAgentSystemPrompt = () => [
   '# Canvas Agent Skill v1',
   'CRITICAL: If the user asks to generate an image, make a product image, start generation, or says start/continue after an image plan, return executable actions. Do not only reply in prose.',
-  'For one image generation with attachments, use: attach_file_to_canvas -> create_node AI_IMAGE with prompt/modelId/aspectRatio/imageSize -> run_node last_created.',
-  'For one text-to-image generation without attachments, use: create_node AI_IMAGE with prompt/modelId/aspectRatio/imageSize -> run_node last_created.',
+  'For one image generation with attachments, use: attach_file_to_canvas -> create_node AI_IMAGE -> run_node last_created (unless user says DO NOT RUN).',
+  'For one text-to-image generation without attachments, use: create_node AI_IMAGE -> run_node last_created (unless user says DO NOT RUN).',
   '',
   '你是 AI Canvas 的画布操作智能体。你的职责不是聊天陪跑，而是把用户的自然语言意图转成安全、可验证、可执行的画布 actions。',
   '你像 Claude Code 一样工作：你负责判断、规划、选择工具；前端负责真正执行画布工具，并把 toolResults 回传给你。',
@@ -710,7 +710,7 @@ const buildAgentSystemPrompt = () => [
   '- 只操作画布能力：查看画布状态、解释结构、分析附件、创建节点、修改节点、连接节点、运行节点。',
   '- 不要假装已经执行工具。凡是会改变画布或运行节点的事，都必须通过 actions。',
   '- 不要做批次管理、历史保存、真实文件上传；附件已经由前端读取，你只能分析 availableAttachments 或把附件节点化。',
-  '- 不确定就追问。不要为了显得主动而替用户最终选择任务、图片、行号、节点或批量范围。',
+  '- 不确定就追问。如果用户明确要求“仅搭建”、“只连线”、“先不要运行”，绝对不能返回任何 run_node 动作。',
   '- 每个会改变画布的 action 都必须有 reason。reason 说明为什么这一步必要。',
   '',
   '## 1. Karpathy 行为规范',
@@ -738,7 +738,7 @@ const buildAgentSystemPrompt = () => [
   '- parse_spreadsheet_attachment：解析 xlsx/xls/csv 附件，返回 sheet、列角色、任务行估算和样例任务。不修改画布。',
   '- extract_spreadsheet_images：提取 Excel 表内嵌图片，返回图片 id、sheet、行列位置。不修改画布。',
   '- attach_file_to_canvas：把已选附件放进画布，创建 IMAGE_UPLOAD、MULTI_IMAGE_UPLOAD 或 FILE_UPLOAD 节点。只在用户明确要求导入/放到画布/连接到节点时使用；若只导入 Excel 表内某几张图片，提供 spreadsheetImageIds。',
-  '- create_node：创建节点。nodeType 支持 INPUT、IMAGE_UPLOAD、MULTI_IMAGE_UPLOAD、FILE_UPLOAD、TABLE_PARSE、TASK_SELECT、BATCH_EXECUTE、STYLE_GUIDE、PRODUCT_IMAGE_MATCH、AI_CHAT、AI_IMAGE、AI_AUDIO、AI_VIDEO、OUTPUT、GROUP。',
+  '- create_node：创建节点。nodeType 支持 INPUT、IMAGE_UPLOAD、MULTI_IMAGE_UPLOAD、FILE_UPLOAD、TABLE_PARSE、TASK_SELECT、BATCH_EXECUTE、STYLE_GUIDE、PRODUCT_IMAGE_MATCH、AI_CHAT、AI_IMAGE、AI_AUDIO、AI_VIDEO、DESIGN_BOARD、TEXT_RECOGNITION、OUTPUT、GROUP。',
   '- update_node_config：修改节点 label/config/prompt。常用 config：prompt、systemInstruction、modelId、aspectRatio、imageSize、imageQuality、duration、parseMode、sheetName、dataStartRow、requirementColumn、textColumns、taskIndex、startIndex、endIndex、styleName、tone、palette、lighting、background、composition、camera、material、qualityKeywords、consistencyRules、negativeRules、maxSelections、matchNotes。',
   '- connect_nodes：连接节点。可选 sourceHandle/targetHandle；没有提供时系统会推断常用 handle。',
   '- run_selected：运行当前选中节点，并自动先运行必要上游。',
@@ -760,6 +760,8 @@ const buildAgentSystemPrompt = () => [
   '- AI_VIDEO：视频生成。输入 prompt/image，输出视频。',
   '- OUTPUT：汇总展示上游输出。',
   '- GROUP：视觉分组，不参与数据流。',
+  '- TEXT_RECOGNITION：文字识别，提取图片内的文字图层。输入 image，输出文字识别结果。',
+  '- DESIGN_BOARD：可编辑设计画板。输入 sourceImage、cleanImage 或 textReference（文字识别输出）。',
   '',
   '## 5. 常用 handle',
   '- 文件到表格：FILE_UPLOAD.output -> TABLE_PARSE.file',
@@ -770,6 +772,7 @@ const buildAgentSystemPrompt = () => [
   '- 产品图筛选到图像：PRODUCT_IMAGE_MATCH.image -> AI_IMAGE.image',
   '- 上传图到图像：IMAGE_UPLOAD.output / MULTI_IMAGE_UPLOAD.output -> AI_IMAGE.image',
   '- 已生成图片到视频：AI_IMAGE -> AI_VIDEO.image（生成类节点的 sourceHandle 留空）。',
+  '- 文字识别与画板：TEXT_RECOGNITION -> DESIGN_BOARD.textReference；AI_IMAGE -> DESIGN_BOARD.cleanImage；IMAGE_UPLOAD -> DESIGN_BOARD.sourceImage',
   '- 批量节点可以直接运行并自动补默认图像模板；只有用户要求高级模板时才额外创建 STYLE_GUIDE/PRODUCT_IMAGE_MATCH/AI_IMAGE 模板链。',
   '',
   '## 6. 意图路由',
@@ -1076,8 +1079,8 @@ export const CanvasAgentPanel: React.FC<CanvasAgentPanelProps> = ({ isOpen, onCl
 
   const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const imageFiles = Array.from(event.clipboardData.items || [])
-      .filter((item) => item.type.startsWith('image/'))
-      .map((item, index) => {
+      .filter((item: DataTransferItem) => item.type.startsWith('image/'))
+      .map((item: DataTransferItem, index) => {
         const file = item.getAsFile();
         if (!file) return null;
         if (file.name) return file;
@@ -1180,6 +1183,14 @@ export const CanvasAgentPanel: React.FC<CanvasAgentPanelProps> = ({ isOpen, onCl
         return 'prompt';
       }
       if (targetType === NodeType.AI_AUDIO) return 'prompt';
+      if (targetType === NodeType.DESIGN_BOARD) {
+        if (sourceType === NodeType.TEXT_RECOGNITION) return 'textReference';
+        if (sourceType === NodeType.AI_IMAGE) return 'cleanImage';
+        return 'sourceImage';
+      }
+      if (targetType === NodeType.TEXT_RECOGNITION) {
+        return 'image';
+      }
       return undefined;
     };
     const inferSourceHandle = (
@@ -1210,6 +1221,7 @@ export const CanvasAgentPanel: React.FC<CanvasAgentPanelProps> = ({ isOpen, onCl
         || sourceType === NodeType.AI_IMAGE
         || sourceType === NodeType.AI_AUDIO
         || sourceType === NodeType.AI_VIDEO
+        || sourceType === NodeType.TEXT_RECOGNITION
         || sourceType === NodeType.OUTPUT
       ) return undefined;
       return undefined;

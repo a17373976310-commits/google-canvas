@@ -69,6 +69,12 @@ export function normalizeImageSrc(raw: unknown): string | null {
         if (typeof obj.primaryUrl === 'string' && obj.primaryUrl.trim()) {
             return normalizeImageSrc(obj.primaryUrl);
         }
+        if (typeof obj.previewDataUrl === 'string' && obj.previewDataUrl.trim()) {
+            return normalizeImageSrc(obj.previewDataUrl);
+        }
+        if (typeof obj.image === 'string' && obj.image.trim()) {
+            return normalizeImageSrc(obj.image);
+        }
         if (Array.isArray(obj.urls) && obj.urls.length > 0) {
             return normalizeImageSrc(obj.urls[0]);
         }

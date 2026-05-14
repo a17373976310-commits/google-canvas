@@ -213,7 +213,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
             setActiveProvider(providerData.id);
         }
 
-        pushNotice('success', editingProvider.id ? '供应商已更新' : '供应商已添加');
+        pushNotice('success', editingProvider.id ? '调试供货商已更新' : '调试供货商已添加');
         setEditingProvider(null);
         setTestResult(null);
         setView('list');
@@ -323,9 +323,9 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                             <Globe size={20} />
                         </div>
                         <div>
-                            <h2 className="text-base font-black theme-text-primary">API 供应商</h2>
+                            <h2 className="text-base font-black theme-text-primary">本机调试 API</h2>
                             <p className="text-[11px] theme-text-muted">
-                                {view === 'list' ? '管理默认供应商和各类型模型路由' : '配置供应商连接与模型清单'}
+                                {view === 'list' ? '仅用于母版本机直连调试，不影响子版发布模型' : '配置本机调试连接与模型清单'}
                             </p>
                         </div>
                     </div>
@@ -344,8 +344,8 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                             <section className="api-provider-route-panel">
                                 <div className="api-provider-section-head">
                                     <div>
-                                        <p>模型路由</p>
-                                        <span>不同节点类型可以使用不同供货商</span>
+                                        <p>本机调试路由</p>
+                                        <span>只影响母版本机直连测试，子版以模型线路中心为准</span>
                                     </div>
                                     <button
                                         type="button"
@@ -377,7 +377,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
 
                             <div className="api-provider-list-head">
                                 <div>
-                                    <p>供应商</p>
+                                    <p>调试供货商</p>
                                     <span>{apiProviders.length} 个配置</span>
                                 </div>
                                 <button type="button" onClick={startAdd} className="api-provider-add-compact">
@@ -432,7 +432,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                                                             type="button"
                                                             onClick={() => setActiveProviderForModality(option.value, provider.id)}
                                                             className={`api-route-pill ${selected ? 'is-selected' : ''}`}
-                                                            title={`设为${option.label}供应商：${option.hint}`}
+                                                            title={`设为${option.label}调试供货商：${option.hint}`}
                                                         >
                                                             {MODALITY_UI[option.value].short}
                                                         </button>
@@ -451,7 +451,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                                             <button
                                                 onClick={() => {
                                                     deleteProvider(provider.id);
-                                                    pushNotice('info', '供应商已删除');
+                                                    pushNotice('info', '调试供货商已删除');
                                                 }}
                                                 className="api-icon-button is-danger"
                                                 title="删除"
@@ -464,7 +464,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                             )) : (
                                 <div className="flex flex-col items-center justify-center gap-3 rounded-3xl border-2 border-dashed theme-border-subtle py-12 opacity-50">
                                     <Globe size={40} className="theme-text-muted" />
-                                    <p className="text-xs theme-text-muted">还没有配置 API 供应商</p>
+                                    <p className="text-xs theme-text-muted">还没有配置本机调试 API</p>
                                 </div>
                             )}
                         </div>
@@ -498,13 +498,13 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                                         <Server size={16} />
                                         <div>
                                             <p>连接设置</p>
-                                            <span>供应商名称、访问地址和协议</span>
+                                            <span>调试供货商名称、访问地址和协议</span>
                                         </div>
                                     </div>
 
                                     <div className="api-provider-two-col">
                                         <label className="api-provider-field">
-                                            <span className="api-provider-field-label">供应商名称</span>
+                                            <span className="api-provider-field-label">调试供货商名称</span>
                                             <input
                                                 type="text"
                                                 name={`${formAutoFillSeed}-provider-name`}
@@ -516,7 +516,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                                             />
                                         </label>
                                         <label className="api-provider-field">
-                                            <span className="api-provider-field-label">供应商模板</span>
+                                            <span className="api-provider-field-label">调试供货商模板</span>
                                             <select
                                                 className="api-provider-input api-provider-select"
                                                 value={editingProvider?.format || DEFAULT_PROVIDER_FORMAT}
@@ -607,7 +607,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                                         <span className={editingProvider?.isDefault ? 'is-checked' : ''}>
                                             {editingProvider?.isDefault && <Check size={13} />}
                                         </span>
-                                        设为默认供应商
+                                        设为默认调试供货商
                                     </label>
                                 </section>
 
@@ -682,7 +682,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onCl
                                     onClick={handleSave}
                                     className="api-provider-save-button"
                                 >
-                                    {editingProvider?.id ? '保存修改' : '添加供应商'}
+                                    {editingProvider?.id ? '保存修改' : '添加调试供货商'}
                                 </button>
                             </div>
                         </form>

@@ -48,15 +48,15 @@ export const TerminalOutput = () => {
     };
 
     return (
-        <div className={`canvas-terminal fixed bottom-4 left-1/2 z-[80] -translate-x-1/2 transition-all duration-300 ease-out max-w-[calc(100vw-128px)] ${isExpanded ? 'w-[720px]' : 'w-[340px]'}`}>
-            <div className="theme-bg-elevated border theme-border-subtle rounded-xl theme-shadow-panel backdrop-blur-xl overflow-hidden flex flex-col">
+        <div className={`canvas-terminal fixed bottom-4 left-1/2 z-[80] -translate-x-1/2 transition-all duration-300 ease-out max-w-[calc(100vw-128px)] ${isExpanded ? 'w-[720px]' : 'w-[380px]'}`}>
+            <div className="canvas-terminal-shell theme-bg-elevated border theme-border-subtle rounded-xl theme-shadow-panel backdrop-blur-xl overflow-hidden flex flex-col">
                 {/* Header */}
                 <div
-                    className={`px-3 py-2 flex min-h-10 items-center justify-between cursor-pointer select-none ${isExpanded ? 'border-b theme-border-subtle' : ''}`}
+                    className={`canvas-terminal-header px-3 py-2 flex min-h-10 items-center justify-between cursor-pointer select-none ${isExpanded ? 'border-b theme-border-subtle' : ''}`}
                     onClick={() => setIsExpanded(!isExpanded)}
                 >
                     <div className="flex min-w-0 items-center gap-2.5">
-                        <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${logs.some(l => l.level === 'error') ? 'bg-rose-500/10 text-rose-500' : 'bg-indigo-500/10 text-indigo-500'}`}>
+                        <div className={`canvas-terminal-mark flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${logs.some(l => l.level === 'error') ? 'is-error' : ''}`}>
                             <Terminal size={13} />
                         </div>
                         <div className="flex min-w-0 items-center gap-2">

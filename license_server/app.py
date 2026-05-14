@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import os
+import json
 import secrets
 import sqlite3
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +21,11 @@ APP_NAME = "AWEI License Server"
 DB_PATH = Path(os.getenv("LICENSE_DB_PATH", "license_server.db"))
 ADMIN_TOKEN = os.getenv("LICENSE_ADMIN_TOKEN", "change-me-now")
 LEASE_HOURS = int(os.getenv("LICENSE_LEASE_HOURS", "24"))
+MODEL_HEALTH_WINDOW_HOURS = int(os.getenv("MODEL_HEALTH_WINDOW_HOURS", "5"))
+MODEL_HEALTH_BUCKET_MINUTES = int(os.getenv("MODEL_HEALTH_BUCKET_MINUTES", "5"))
+MIN_RUN_CREDITS = int(os.getenv("LICENSE_MIN_RUN_CREDITS", "10"))
+EXECUTE_BACKEND_URL = os.getenv("LICENSE_EXECUTE_BACKEND_URL", "http://127.0.0.1:8000/execute")
+EXECUTE_BACKEND_TIMEOUT_SECONDS = float(os.getenv("LICENSE_EXECUTE_BACKEND_TIMEOUT_SECONDS", "300"))
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv("LICENSE_CORS_ORIGINS", "*").split(",")
@@ -146,6 +155,86 @@ def init_db() -> None:
               updated_at TEXT NOT NULL,
               deleted_at TEXT DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS model_providers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              group_name TEXT NOT NULL DEFAULT 'General',
+              provider_type TEXT NOT NULL DEFAULT 'openai-compatible',
+              base_url TEXT NOT NULL DEFAULT '',
+              api_key_cipher TEXT NOT NULL DEFAULT '',
+              supported_models TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'enabled',
+              priority INTEGER NOT NULL DEFAULT 100,
+              cost_multiplier REAL NOT NULL DEFAULT 1.0,
+              notes TEXT DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS model_routes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              model_id TEXT NOT NULL,
+              display_name TEXT DEFAULT '',
+              model_group TEXT NOT NULL DEFAULT 'chat',
+              provider_id INTEGER NOT NULL,
+              route_name TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'enabled',
+              weight INTEGER NOT NULL DEFAULT 100,
+              token_cost INTEGER NOT NULL DEFAULT 0,
+              notes TEXT DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(provider_id) REFERENCES model_providers(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS model_call_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              route_id INTEGER,
+              provider_id INTEGER,
+              license_key TEXT DEFAULT '',
+              device_id TEXT DEFAULT '',
+              model_id TEXT NOT NULL,
+              model_group TEXT DEFAULT '',
+              node_type TEXT DEFAULT '',
+              success INTEGER NOT NULL DEFAULT 0,
+              latency_ms INTEGER NOT NULL DEFAULT 0,
+              error_code TEXT DEFAULT '',
+              error_message TEXT DEFAULT '',
+              tokens_charged INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS credit_accounts (
+              license_key TEXT PRIMARY KEY,
+              balance INTEGER NOT NULL DEFAULT 0,
+              reserved_balance INTEGER NOT NULL DEFAULT 0,
+              lifetime_granted INTEGER NOT NULL DEFAULT 0,
+              lifetime_spent INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL DEFAULT 'enabled',
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(license_key) REFERENCES licenses(license_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS credit_transactions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              license_key TEXT NOT NULL,
+              amount INTEGER NOT NULL,
+              reserved_amount INTEGER NOT NULL DEFAULT 0,
+              settled_amount INTEGER NOT NULL DEFAULT 0,
+              transaction_type TEXT NOT NULL DEFAULT 'adjustment',
+              status TEXT NOT NULL DEFAULT 'settled',
+              reason TEXT NOT NULL DEFAULT '',
+              route_id INTEGER,
+              device_id TEXT DEFAULT '',
+              model_id TEXT DEFAULT '',
+              model_group TEXT DEFAULT '',
+              node_type TEXT DEFAULT '',
+              request_id TEXT DEFAULT '',
+              metadata_json TEXT DEFAULT '',
+              updated_at TEXT DEFAULT '',
+              created_at TEXT NOT NULL
+            );
             """
         )
         device_columns = {
@@ -162,6 +251,36 @@ def init_db() -> None:
         }
         if "deleted_at" not in announcement_columns:
             db.execute("ALTER TABLE announcements ADD COLUMN deleted_at TEXT DEFAULT ''")
+        credit_account_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(credit_accounts)").fetchall()
+        }
+        for column_name, column_sql in {
+            "reserved_balance": "ALTER TABLE credit_accounts ADD COLUMN reserved_balance INTEGER NOT NULL DEFAULT 0",
+            "lifetime_granted": "ALTER TABLE credit_accounts ADD COLUMN lifetime_granted INTEGER NOT NULL DEFAULT 0",
+            "lifetime_spent": "ALTER TABLE credit_accounts ADD COLUMN lifetime_spent INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column_name not in credit_account_columns:
+                db.execute(column_sql)
+        credit_transaction_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(credit_transactions)").fetchall()
+        }
+        for column_name, column_sql in {
+            "reserved_amount": "ALTER TABLE credit_transactions ADD COLUMN reserved_amount INTEGER NOT NULL DEFAULT 0",
+            "settled_amount": "ALTER TABLE credit_transactions ADD COLUMN settled_amount INTEGER NOT NULL DEFAULT 0",
+            "transaction_type": "ALTER TABLE credit_transactions ADD COLUMN transaction_type TEXT NOT NULL DEFAULT 'adjustment'",
+            "status": "ALTER TABLE credit_transactions ADD COLUMN status TEXT NOT NULL DEFAULT 'settled'",
+            "device_id": "ALTER TABLE credit_transactions ADD COLUMN device_id TEXT DEFAULT ''",
+            "model_id": "ALTER TABLE credit_transactions ADD COLUMN model_id TEXT DEFAULT ''",
+            "model_group": "ALTER TABLE credit_transactions ADD COLUMN model_group TEXT DEFAULT ''",
+            "node_type": "ALTER TABLE credit_transactions ADD COLUMN node_type TEXT DEFAULT ''",
+            "request_id": "ALTER TABLE credit_transactions ADD COLUMN request_id TEXT DEFAULT ''",
+            "metadata_json": "ALTER TABLE credit_transactions ADD COLUMN metadata_json TEXT DEFAULT ''",
+            "updated_at": "ALTER TABLE credit_transactions ADD COLUMN updated_at TEXT DEFAULT ''",
+        }.items():
+            if column_name not in credit_transaction_columns:
+                db.execute(column_sql)
         db.execute(
             """
             INSERT OR IGNORE INTO app_version
@@ -223,6 +342,7 @@ class LicenseCreateRequest(BaseModel):
     max_devices: int = Field(default=1, ge=1, le=999)
     notes: str = ""
     license_key: str | None = None
+    initial_credits: int = Field(default=0, ge=0)
 
 
 class LicenseUpdateRequest(BaseModel):
@@ -280,6 +400,117 @@ class AnnouncementUpdateRequest(BaseModel):
     pinned: bool | None = None
     start_at: str | None = None
     end_at: str | None = None
+
+
+class ModelProviderCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    group_name: str = "General"
+    provider_type: str = "openai-compatible"
+    base_url: str = ""
+    api_key: str = ""
+    supported_models: str = ""
+    status: str = "enabled"
+    priority: int = Field(default=100, ge=0, le=10000)
+    cost_multiplier: float = Field(default=1.0, ge=0)
+    notes: str = ""
+
+
+class ModelProviderUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    group_name: str | None = None
+    provider_type: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    supported_models: str | None = None
+    status: str | None = None
+    priority: int | None = Field(default=None, ge=0, le=10000)
+    cost_multiplier: float | None = Field(default=None, ge=0)
+    notes: str | None = None
+
+
+class ModelRouteCreateRequest(BaseModel):
+    model_id: str = Field(min_length=1, max_length=160)
+    display_name: str = ""
+    model_group: str = "chat"
+    provider_id: int = Field(ge=1)
+    route_name: str = ""
+    status: str = "enabled"
+    weight: int = Field(default=100, ge=0, le=10000)
+    token_cost: int = Field(default=0, ge=0)
+    notes: str = ""
+
+
+class ModelRouteUpdateRequest(BaseModel):
+    model_id: str | None = Field(default=None, min_length=1, max_length=160)
+    display_name: str | None = None
+    model_group: str | None = None
+    provider_id: int | None = Field(default=None, ge=1)
+    route_name: str | None = None
+    status: str | None = None
+    weight: int | None = Field(default=None, ge=0, le=10000)
+    token_cost: int | None = Field(default=None, ge=0)
+    notes: str | None = None
+
+
+class ModelCallLogCreateRequest(BaseModel):
+    route_id: int | None = None
+    provider_id: int | None = None
+    provider_name: str = ""
+    provider_base_url: str = ""
+    license_key: str = ""
+    device_id: str = ""
+    model_id: str = Field(min_length=1, max_length=160)
+    model_group: str = ""
+    node_type: str = ""
+    success: bool = False
+    latency_ms: int = Field(default=0, ge=0)
+    error_code: str = ""
+    error_message: str = ""
+    tokens_charged: int = Field(default=0, ge=0)
+
+
+class CreditAdjustRequest(BaseModel):
+    license_key: str = Field(min_length=4, max_length=128)
+    amount: int = Field(ge=-1000000000, le=1000000000)
+    reason: str = ""
+
+
+class ClientCreditBaseRequest(BaseModel):
+    license_key: str = Field(min_length=4, max_length=128)
+    device_id: str = Field(min_length=8, max_length=256)
+    model_id: str = Field(default="", max_length=160)
+    model_group: str = ""
+    node_type: str = ""
+    route_id: int | None = None
+
+
+class ClientCreditReserveRequest(ClientCreditBaseRequest):
+    estimated_credits: int | None = Field(default=None, ge=0)
+    request_id: str = ""
+
+
+class ClientCreditSettleRequest(BaseModel):
+    license_key: str = Field(min_length=4, max_length=128)
+    device_id: str = Field(min_length=8, max_length=256)
+    transaction_id: int = Field(ge=1)
+    actual_credits: int | None = Field(default=None, ge=0)
+    success: bool = True
+    reason: str = ""
+
+
+class ClientCreditRefundRequest(BaseModel):
+    license_key: str = Field(min_length=4, max_length=128)
+    device_id: str = Field(min_length=8, max_length=256)
+    transaction_id: int = Field(ge=1)
+    reason: str = ""
+
+
+class ClientExecuteRequest(ClientCreditBaseRequest):
+    node_id: str = ""
+    node_type: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    request_id: str = ""
 
 
 app = FastAPI(title=APP_NAME)
@@ -411,6 +642,849 @@ def serialize_announcement(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def normalize_model_status(status: str) -> str:
+    normalized = (status or "enabled").strip()
+    if normalized not in {"enabled", "disabled"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    return normalized
+
+
+def normalize_text(value: str | None, fallback: str = "") -> str:
+    return (value if value is not None else fallback).strip()
+
+
+MODEL_GROUP_ALIASES = {
+    "chat": "chat",
+    "text": "chat",
+    "reason": "chat",
+    "reasoning": "chat",
+    "conversation": "chat",
+    "llm": "chat",
+    "对话": "chat",
+    "文本": "chat",
+    "推理": "chat",
+    "image": "image",
+    "img": "image",
+    "imagen": "image",
+    "picture": "image",
+    "图像": "image",
+    "图片": "image",
+    "生图": "image",
+    "audio": "audio",
+    "voice": "audio",
+    "speech": "audio",
+    "tts": "audio",
+    "音频": "audio",
+    "语音": "audio",
+    "video": "video",
+    "veo": "video",
+    "motion": "video",
+    "视频": "video",
+    "动效": "video",
+}
+
+
+def normalize_model_group(value: str | None = "", fallback_text: str = "") -> str:
+    normalized = normalize_text(value, "").lower()
+    if normalized in MODEL_GROUP_ALIASES:
+        return MODEL_GROUP_ALIASES[normalized]
+
+    text = f"{normalized} {normalize_text(fallback_text, '').lower()}".strip()
+    if any(token in text for token in ("image", "img", "imagen", "seedream", "picture", "图像", "图片", "生图")):
+        return "image"
+    if any(token in text for token in ("audio", "tts", "voice", "speech", "音频", "语音")):
+        return "audio"
+    if any(token in text for token in ("video", "veo", "motion", "sora", "视频", "动效")):
+        return "video"
+    return "chat"
+
+
+def api_key_preview(api_key: str) -> str:
+    if not api_key:
+        return ""
+    if len(api_key) <= 8:
+        return "*" * len(api_key)
+    return f"{api_key[:4]}...{api_key[-4:]}"
+
+
+def serialize_model_provider(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    raw_key = item.pop("api_key_cipher", "") or ""
+    item["has_api_key"] = bool(raw_key)
+    item["api_key_preview"] = api_key_preview(raw_key)
+    return item
+
+
+def serialize_model_route(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return dict(row)
+
+
+def ensure_provider_exists(db: sqlite3.Connection, provider_id: int) -> None:
+    exists = db.execute("SELECT 1 FROM model_providers WHERE id = ?", (provider_id,)).fetchone()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Provider not found")
+
+
+def ensure_credit_account(db: sqlite3.Connection, license_key: str) -> dict[str, Any]:
+    license_row = row_to_dict(db.execute("SELECT * FROM licenses WHERE license_key = ?", (license_key,)).fetchone())
+    if not license_row:
+        raise HTTPException(status_code=404, detail="License not found")
+
+    timestamp = now_iso()
+    db.execute(
+        """
+        INSERT OR IGNORE INTO credit_accounts
+          (license_key, balance, reserved_balance, lifetime_granted, lifetime_spent, status, updated_at)
+        VALUES (?, 0, 0, 0, 0, 'enabled', ?)
+        """,
+        (license_key, timestamp),
+    )
+    account = row_to_dict(db.execute("SELECT * FROM credit_accounts WHERE license_key = ?", (license_key,)).fetchone())
+    if not account:
+        raise HTTPException(status_code=500, detail="Credit account unavailable")
+    return account
+
+
+def serialize_credit_account(account: dict[str, Any], license_row: dict[str, Any] | None = None) -> dict[str, Any]:
+    balance = int(account.get("balance") or 0)
+    reserved = int(account.get("reserved_balance") or 0)
+    return {
+        "license_key": account.get("license_key", ""),
+        "customer_name": (license_row or {}).get("customer_name", ""),
+        "license_status": (license_row or {}).get("status", ""),
+        "balance": balance,
+        "reserved_balance": reserved,
+        "available_balance": max(0, balance - reserved),
+        "lifetime_granted": int(account.get("lifetime_granted") or 0),
+        "lifetime_spent": int(account.get("lifetime_spent") or 0),
+        "status": account.get("status", "enabled"),
+        "updated_at": account.get("updated_at", ""),
+    }
+
+
+def serialize_credit_transaction(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    try:
+        item["metadata"] = json.loads(item.get("metadata_json") or "{}")
+    except (TypeError, ValueError):
+        item["metadata"] = {}
+    item.pop("metadata_json", None)
+    return item
+
+
+def attach_credit_to_license(db: sqlite3.Connection, license_row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(license_row)
+    account = serialize_credit_account(ensure_credit_account(db, item["license_key"]), item)
+    item.update(
+        {
+            "credit_balance": account["balance"],
+            "credit_reserved_balance": account["reserved_balance"],
+            "credit_available_balance": account["available_balance"],
+            "credit_lifetime_granted": account["lifetime_granted"],
+            "credit_lifetime_spent": account["lifetime_spent"],
+            "credit_status": account["status"],
+            "credit_updated_at": account["updated_at"],
+        }
+    )
+    return item
+
+
+def grant_initial_credits(db: sqlite3.Connection, license_key: str, amount: int, timestamp: str) -> None:
+    if amount <= 0:
+        return
+
+    ensure_credit_account(db, license_key)
+    db.execute(
+        """
+        UPDATE credit_accounts
+        SET balance = balance + ?,
+            lifetime_granted = lifetime_granted + ?,
+            updated_at = ?
+        WHERE license_key = ?
+        """,
+        (amount, amount, timestamp, license_key),
+    )
+    db.execute(
+        """
+        INSERT INTO credit_transactions
+          (license_key, amount, reserved_amount, settled_amount, transaction_type, status,
+           reason, route_id, device_id, model_id, model_group, node_type, request_id,
+           metadata_json, created_at, updated_at)
+        VALUES (?, ?, 0, 0, 'adjustment', 'settled', 'Initial company credits', NULL, '', '', '', '', '', '{}', ?, ?)
+        """,
+        (license_key, amount, timestamp, timestamp),
+    )
+
+
+def validate_credit_device(db: sqlite3.Connection, license_key: str, device_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    license_row = row_to_dict(db.execute("SELECT * FROM licenses WHERE license_key = ?", (license_key,)).fetchone())
+    if not license_row:
+        raise HTTPException(status_code=403, detail="License not found")
+    if license_row["status"] != "enabled":
+        raise HTTPException(status_code=403, detail="License disabled")
+    if parse_dt(license_row["expires_at"]) <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=403, detail="License expired")
+
+    device_row = row_to_dict(db.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,)).fetchone())
+    if not device_row or device_row.get("license_key") != license_key:
+        raise HTTPException(status_code=403, detail="Device is not activated for this license")
+    if device_row.get("status") != "enabled":
+        raise HTTPException(status_code=403, detail="Device not enabled")
+    return license_row, device_row
+
+
+def fallback_credit_cost(node_type: str, model_group: str = "") -> int:
+    text = f"{node_type} {model_group}".lower()
+    if "video" in text:
+        return 100
+    if "image" in text:
+        return 10
+    if "audio" in text or "tts" in text:
+        return 5
+    return 1
+
+
+def required_credit_balance(estimated_credits: int) -> int:
+    return max(1, int(estimated_credits or 0), MIN_RUN_CREDITS)
+
+
+def find_billable_model_route(
+    db: sqlite3.Connection,
+    model_id: str,
+    route_id: int | None = None,
+    model_group: str = "",
+) -> dict[str, Any] | None:
+    if route_id:
+        return row_to_dict(
+            db.execute(
+                """
+                SELECT model_routes.*,
+                  model_providers.name AS provider_name,
+                  model_providers.group_name AS provider_group,
+                  model_providers.status AS provider_status
+                FROM model_routes
+                JOIN model_providers ON model_providers.id = model_routes.provider_id
+                WHERE model_routes.id = ?
+                """,
+                (route_id,),
+            ).fetchone()
+        )
+
+    if not model_id.strip():
+        return None
+
+    normalized_group = normalize_model_group(model_group, model_id) if model_group.strip() else ""
+    rows = db.execute(
+        """
+        SELECT model_routes.*,
+          model_providers.name AS provider_name,
+          model_providers.group_name AS provider_group,
+          model_providers.status AS provider_status
+        FROM model_routes
+        JOIN model_providers ON model_providers.id = model_routes.provider_id
+        WHERE model_routes.model_id = ?
+          AND model_routes.status = 'enabled'
+          AND model_providers.status = 'enabled'
+        ORDER BY
+          model_routes.weight DESC,
+          model_routes.token_cost ASC,
+          model_routes.id ASC
+        LIMIT 20
+        """,
+        (model_id.strip(),),
+    ).fetchall()
+    if normalized_group:
+        for row in rows:
+            if normalize_model_group(row["model_group"], row["model_id"]) == normalized_group:
+                return row_to_dict(row)
+    return row_to_dict(rows[0]) if rows else None
+
+
+def find_executable_model_route(
+    db: sqlite3.Connection,
+    model_id: str,
+    route_id: int | None = None,
+    model_group: str = "",
+) -> dict[str, Any] | None:
+    if route_id:
+        return row_to_dict(
+            db.execute(
+                """
+                SELECT model_routes.*,
+                  model_providers.name AS provider_name,
+                  model_providers.group_name AS provider_group,
+                  model_providers.provider_type AS provider_type,
+                  model_providers.base_url AS provider_base_url,
+                  model_providers.api_key_cipher AS provider_api_key,
+                  model_providers.status AS provider_status
+                FROM model_routes
+                JOIN model_providers ON model_providers.id = model_routes.provider_id
+                WHERE model_routes.id = ?
+                  AND model_routes.status = 'enabled'
+                  AND model_providers.status = 'enabled'
+                """,
+                (route_id,),
+            ).fetchone()
+        )
+
+    if not model_id.strip():
+        return None
+
+    normalized_group = normalize_model_group(model_group, model_id) if model_group.strip() else ""
+    rows = db.execute(
+        """
+        SELECT model_routes.*,
+          model_providers.name AS provider_name,
+          model_providers.group_name AS provider_group,
+          model_providers.provider_type AS provider_type,
+          model_providers.base_url AS provider_base_url,
+          model_providers.api_key_cipher AS provider_api_key,
+          model_providers.status AS provider_status
+        FROM model_routes
+        JOIN model_providers ON model_providers.id = model_routes.provider_id
+        WHERE model_routes.model_id = ?
+          AND model_routes.status = 'enabled'
+          AND model_providers.status = 'enabled'
+        ORDER BY
+          model_routes.weight DESC,
+          model_routes.token_cost ASC,
+          model_routes.id ASC
+        LIMIT 20
+        """,
+        (model_id.strip(),),
+    ).fetchall()
+    if normalized_group:
+        for row in rows:
+            if normalize_model_group(row["model_group"], row["model_id"]) == normalized_group:
+                return row_to_dict(row)
+    return row_to_dict(rows[0]) if rows else None
+
+
+def build_credit_quote(db: sqlite3.Connection, payload: ClientCreditBaseRequest) -> dict[str, Any]:
+    model_id = payload.model_id.strip()
+    model_group = normalize_model_group(payload.model_group, f"{payload.node_type} {model_id}")
+    route = find_billable_model_route(db, model_id, payload.route_id, model_group)
+    if route and int(route.get("token_cost") or 0) > 0:
+        estimated_credits = int(route.get("token_cost") or 0)
+    else:
+        estimated_credits = fallback_credit_cost(payload.node_type, model_group or (route or {}).get("model_group", ""))
+
+    return {
+        "estimated_credits": max(1, estimated_credits),
+        "route": {
+            "id": route.get("id"),
+            "model_id": route.get("model_id", model_id),
+            "display_name": route.get("display_name", ""),
+            "model_group": route.get("model_group", model_group),
+            "route_name": route.get("route_name", ""),
+            "token_cost": int(route.get("token_cost") or 0),
+        } if route else None,
+    }
+
+
+def find_matching_model_route(db: sqlite3.Connection, payload: ModelCallLogCreateRequest) -> dict[str, Any] | None:
+    if payload.route_id:
+        return row_to_dict(
+            db.execute(
+                """
+                SELECT model_routes.*, model_providers.base_url AS provider_base_url
+                FROM model_routes
+                JOIN model_providers ON model_providers.id = model_routes.provider_id
+                WHERE model_routes.id = ?
+                """,
+                (payload.route_id,),
+            ).fetchone()
+        )
+
+    model_id = payload.model_id.strip()
+    base_url = payload.provider_base_url.strip().rstrip("/")
+    provider_name = payload.provider_name.strip()
+    if base_url:
+        row = row_to_dict(
+            db.execute(
+                """
+                SELECT model_routes.*, model_providers.base_url AS provider_base_url
+                FROM model_routes
+                JOIN model_providers ON model_providers.id = model_routes.provider_id
+                WHERE model_routes.model_id = ?
+                  AND rtrim(model_providers.base_url, '/') = ?
+                ORDER BY
+                  CASE WHEN model_routes.status = 'enabled' AND model_providers.status = 'enabled' THEN 0 ELSE 1 END,
+                  model_routes.weight DESC,
+                  model_routes.id ASC
+                LIMIT 1
+                """,
+                (model_id, base_url),
+            ).fetchone()
+        )
+        if row:
+            return row
+
+    if provider_name:
+        row = row_to_dict(
+            db.execute(
+                """
+                SELECT model_routes.*, model_providers.base_url AS provider_base_url
+                FROM model_routes
+                JOIN model_providers ON model_providers.id = model_routes.provider_id
+                WHERE model_routes.model_id = ?
+                  AND lower(model_providers.name) = lower(?)
+                ORDER BY
+                  CASE WHEN model_routes.status = 'enabled' AND model_providers.status = 'enabled' THEN 0 ELSE 1 END,
+                  model_routes.weight DESC,
+                  model_routes.id ASC
+                LIMIT 1
+                """,
+                (model_id, provider_name),
+            ).fetchone()
+        )
+        if row:
+            return row
+
+    normalized_group = normalize_model_group(payload.model_group, f"{payload.node_type} {model_id}") if (payload.model_group or payload.node_type) else ""
+    rows = db.execute(
+        """
+        SELECT model_routes.*, model_providers.base_url AS provider_base_url
+        FROM model_routes
+        JOIN model_providers ON model_providers.id = model_routes.provider_id
+        WHERE model_routes.model_id = ?
+        ORDER BY
+          CASE WHEN ? != '' AND lower(model_routes.model_group) = ? THEN 0 ELSE 1 END,
+          CASE WHEN model_routes.status = 'enabled' AND model_providers.status = 'enabled' THEN 0 ELSE 1 END,
+          model_routes.weight DESC,
+          model_routes.id ASC
+        LIMIT 4
+        """,
+        (model_id, normalized_group, normalized_group),
+    ).fetchall()
+    if normalized_group:
+        exact_rows = [
+            row for row in rows
+            if normalize_model_group(row["model_group"], row["model_id"]) == normalized_group
+        ]
+        if len(exact_rows) == 1:
+            return row_to_dict(exact_rows[0])
+    if len(rows) == 1:
+        return row_to_dict(rows[0])
+    return None
+
+
+def record_model_call_log(db: sqlite3.Connection, payload: ModelCallLogCreateRequest) -> dict[str, Any]:
+    timestamp = now_iso()
+    matched_route = find_matching_model_route(db, payload)
+    if payload.route_id and not matched_route:
+        raise HTTPException(status_code=404, detail="Route not found")
+
+    provider_id = payload.provider_id
+    route_id = payload.route_id
+    model_group = payload.model_group.strip()
+
+    if matched_route:
+        route_id = int(matched_route["id"])
+        provider_id = int(matched_route["provider_id"])
+        model_group = model_group or str(matched_route.get("model_group") or "")
+
+    db.execute(
+        """
+        INSERT INTO model_call_logs
+          (route_id, provider_id, license_key, device_id, model_id, model_group, node_type,
+           success, latency_ms, error_code, error_message, tokens_charged, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            route_id,
+            provider_id,
+            payload.license_key.strip(),
+            payload.device_id.strip(),
+            payload.model_id.strip(),
+            model_group,
+            payload.node_type.strip(),
+            1 if payload.success else 0,
+            payload.latency_ms,
+            payload.error_code.strip(),
+            payload.error_message.strip()[:1000],
+            payload.tokens_charged,
+            timestamp,
+        ),
+    )
+    return {
+        "created": True,
+        "created_at": timestamp,
+        "route_id": route_id,
+        "provider_id": provider_id,
+        "matched": bool(matched_route),
+    }
+
+
+def infer_execute_model_id(payload: ClientExecuteRequest) -> str:
+    if payload.model_id.strip():
+        return payload.model_id.strip()
+    config = payload.config or {}
+    for key in ("modelId", "model", "chatModelId", "imageModelId", "audioModelId", "videoModelId"):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def infer_execute_model_group(node_type: str, fallback: str = "") -> str:
+    if fallback.strip():
+        return normalize_model_group(fallback, node_type)
+    text = node_type.lower()
+    if "image" in text or "imagen" in text:
+        return "image"
+    if "audio" in text:
+        return "audio"
+    if "video" in text:
+        return "video"
+    return "chat"
+
+
+def normalize_execute_backend_url() -> str:
+    value = EXECUTE_BACKEND_URL.strip()
+    if not value:
+        raise HTTPException(status_code=500, detail="LICENSE_EXECUTE_BACKEND_URL is empty")
+    if value.endswith("/execute"):
+        return value
+    return f"{value.rstrip('/')}/execute"
+
+
+def read_backend_error(error: urllib.error.HTTPError) -> str:
+    body = error.read().decode("utf-8", errors="ignore")
+    if not body:
+        return f"HTTP {error.code}: {error.reason}"
+    try:
+        parsed = json.loads(body)
+        detail = parsed.get("detail") or parsed.get("message") or parsed.get("error")
+        if detail:
+            return str(detail)
+    except Exception:
+        pass
+    return body[:1000]
+
+
+def call_execute_backend(payload: ClientExecuteRequest, route: dict[str, Any]) -> dict[str, Any]:
+    config = dict(payload.config or {})
+    route_model_id = str(route.get("model_id") or "").strip()
+    if route_model_id:
+        config["modelId"] = route_model_id
+
+    body = {
+        "node_id": payload.node_id or payload.request_id or "",
+        "node_type": payload.node_type,
+        "config": config,
+        "inputs": payload.inputs or {},
+        "provider_name": route.get("provider_name") or route.get("route_name") or "Platform Route",
+        "api_key": route.get("provider_api_key") or "",
+        "base_url": route.get("provider_base_url") or "",
+        "chat_protocol": "auto",
+        "reasoning_protocol": "auto",
+        "image_protocol": "auto",
+    }
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        normalize_execute_backend_url(),
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "AWEI-License-Proxy/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=EXECUTE_BACKEND_TIMEOUT_SECONDS) as response:
+            text = response.read().decode("utf-8", errors="ignore")
+            return json.loads(text) if text else {}
+    except urllib.error.HTTPError as error:
+        raise HTTPException(status_code=error.code, detail=read_backend_error(error)) from error
+    except urllib.error.URLError as error:
+        raise HTTPException(status_code=502, detail=f"模型执行后端不可用：{error.reason}") from error
+
+
+def reserve_credit_for_execute(
+    db: sqlite3.Connection,
+    license_key: str,
+    device_id: str,
+    payload: ClientExecuteRequest,
+    quote: dict[str, Any],
+    license_row: dict[str, Any],
+) -> tuple[int, int, dict[str, Any]]:
+    timestamp = now_iso()
+    account = ensure_credit_account(db, license_key)
+    if account.get("status") != "enabled":
+        raise HTTPException(status_code=402, detail="Credit account disabled")
+
+    estimated = max(1, int(quote.get("estimated_credits") or 1))
+    required = required_credit_balance(estimated)
+    available = int(account.get("balance") or 0) - int(account.get("reserved_balance") or 0)
+    if available < required:
+        raise HTTPException(
+            status_code=402,
+            detail=f"余额不足：本次预计消耗 {estimated} 代币，启动前至少需要 {required} 代币，当前可用 {max(0, available)} 代币",
+        )
+
+    route = quote.get("route") or {}
+    cursor = db.execute(
+        """
+        INSERT INTO credit_transactions
+          (license_key, amount, reserved_amount, settled_amount, transaction_type, status,
+           reason, route_id, device_id, model_id, model_group, node_type, request_id,
+           metadata_json, created_at, updated_at)
+        VALUES (?, 0, ?, 0, 'reserve', 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            license_key,
+            estimated,
+            "Client proxy execution reserve",
+            route.get("id"),
+            device_id,
+            payload.model_id.strip() or route.get("model_id", ""),
+            payload.model_group.strip() or route.get("model_group", ""),
+            payload.node_type.strip(),
+            payload.request_id.strip() or payload.node_id.strip(),
+            json.dumps({"quote": quote, "via": "client_execute"}, ensure_ascii=False),
+            timestamp,
+            timestamp,
+        ),
+    )
+    db.execute(
+        """
+        UPDATE credit_accounts
+        SET reserved_balance = reserved_balance + ?, updated_at = ?
+        WHERE license_key = ?
+        """,
+        (estimated, timestamp, license_key),
+    )
+    db.commit()
+    account = ensure_credit_account(db, license_key)
+    return int(cursor.lastrowid), estimated, serialize_credit_account(account, license_row)
+
+
+def settle_reserved_credit(
+    db: sqlite3.Connection,
+    license_key: str,
+    transaction_id: int,
+    actual: int,
+    reason: str,
+    license_row: dict[str, Any],
+) -> dict[str, Any]:
+    timestamp = now_iso()
+    tx = row_to_dict(
+        db.execute(
+            "SELECT * FROM credit_transactions WHERE id = ? AND license_key = ?",
+            (transaction_id, license_key),
+        ).fetchone()
+    )
+    if not tx or tx.get("status") != "reserved":
+        return serialize_credit_account(ensure_credit_account(db, license_key), license_row)
+
+    reserved = int(tx.get("reserved_amount") or 0)
+    actual = max(0, int(actual))
+    db.execute(
+        """
+        UPDATE credit_accounts
+        SET balance = balance - ?,
+            reserved_balance = MAX(0, reserved_balance - ?),
+            lifetime_spent = lifetime_spent + ?,
+            updated_at = ?
+        WHERE license_key = ?
+        """,
+        (actual, reserved, actual, timestamp, license_key),
+    )
+    db.execute(
+        """
+        UPDATE credit_transactions
+        SET amount = ?,
+            settled_amount = ?,
+            status = 'settled',
+            transaction_type = 'settlement',
+            reason = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (-actual, actual, reason, timestamp, transaction_id),
+    )
+    db.commit()
+    return serialize_credit_account(ensure_credit_account(db, license_key), license_row)
+
+
+def refund_reserved_credit(
+    db: sqlite3.Connection,
+    license_key: str,
+    transaction_id: int,
+    reason: str,
+    license_row: dict[str, Any],
+) -> dict[str, Any]:
+    timestamp = now_iso()
+    tx = row_to_dict(
+        db.execute(
+            "SELECT * FROM credit_transactions WHERE id = ? AND license_key = ?",
+            (transaction_id, license_key),
+        ).fetchone()
+    )
+    if not tx or tx.get("status") != "reserved":
+        return serialize_credit_account(ensure_credit_account(db, license_key), license_row)
+
+    reserved = int(tx.get("reserved_amount") or 0)
+    db.execute(
+        """
+        UPDATE credit_accounts
+        SET reserved_balance = MAX(0, reserved_balance - ?), updated_at = ?
+        WHERE license_key = ?
+        """,
+        (reserved, timestamp, license_key),
+    )
+    db.execute(
+        """
+        UPDATE credit_transactions
+        SET status = 'refunded',
+            reason = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (reason[:1000], timestamp, transaction_id),
+    )
+    db.commit()
+    return serialize_credit_account(ensure_credit_account(db, license_key), license_row)
+
+
+def build_model_health_summary(db: sqlite3.Connection) -> dict[str, Any]:
+    bucket_minutes = max(1, MODEL_HEALTH_BUCKET_MINUTES)
+    window_hours = max(1, MODEL_HEALTH_WINDOW_HOURS)
+    bucket_seconds = bucket_minutes * 60
+    bucket_count = max(1, int((window_hours * 60) / bucket_minutes))
+    end_time = datetime.now(timezone.utc).replace(microsecond=0)
+    start_time = end_time - timedelta(seconds=bucket_seconds * bucket_count)
+
+    route_rows = db.execute(
+        """
+        SELECT model_routes.*,
+          model_providers.name AS provider_name,
+          model_providers.group_name AS provider_group,
+          model_providers.base_url AS provider_base_url,
+          model_providers.status AS provider_status
+        FROM model_routes
+        JOIN model_providers ON model_providers.id = model_routes.provider_id
+        ORDER BY model_routes.model_group ASC, model_routes.model_id ASC, model_routes.weight DESC, model_routes.id ASC
+        """
+    ).fetchall()
+    routes = [dict(row) for row in route_rows]
+    route_map = {int(route["id"]): route for route in routes}
+    buckets_by_route: dict[int, list[dict[str, Any]]] = {}
+    totals_by_route: dict[int, dict[str, int]] = {}
+
+    for route_id in route_map:
+        buckets_by_route[route_id] = [
+            {
+                "index": index,
+                "start_at": (start_time + timedelta(seconds=bucket_seconds * index)).isoformat(),
+                "success_count": 0,
+                "failure_count": 0,
+                "total": 0,
+                "avg_latency_ms": 0,
+                "_latency_sum": 0,
+                "status": "empty",
+            }
+            for index in range(bucket_count)
+        ]
+        totals_by_route[route_id] = {"success": 0, "failure": 0, "total": 0, "latency_sum": 0}
+
+    log_rows = db.execute(
+        """
+        SELECT *
+        FROM model_call_logs
+        WHERE created_at >= ?
+        ORDER BY created_at ASC
+        """,
+        (start_time.isoformat(),),
+    ).fetchall()
+
+    for row in log_rows:
+        log = dict(row)
+        route_id = log.get("route_id")
+        if route_id is None or int(route_id) not in route_map:
+            continue
+        try:
+            created_at = parse_dt(log.get("created_at") or "")
+        except HTTPException:
+            continue
+        index = int((created_at - start_time).total_seconds() // bucket_seconds)
+        if index < 0 or index >= bucket_count:
+            if 0 <= index <= bucket_count:
+                index = bucket_count - 1
+            else:
+                continue
+        success = bool(log.get("success", 0))
+        latency_ms = int(log.get("latency_ms", 0) or 0)
+        bucket = buckets_by_route[int(route_id)][index]
+        bucket["total"] += 1
+        bucket["_latency_sum"] += latency_ms
+        if success:
+            bucket["success_count"] += 1
+            totals_by_route[int(route_id)]["success"] += 1
+        else:
+            bucket["failure_count"] += 1
+            totals_by_route[int(route_id)]["failure"] += 1
+        totals_by_route[int(route_id)]["total"] += 1
+        totals_by_route[int(route_id)]["latency_sum"] += latency_ms
+
+    for route_id, buckets in buckets_by_route.items():
+        for bucket in buckets:
+            if bucket["total"] > 0:
+                success_rate = bucket["success_count"] / bucket["total"]
+                bucket["avg_latency_ms"] = round(bucket["_latency_sum"] / bucket["total"])
+                if success_rate >= 0.9:
+                    bucket["status"] = "ok"
+                elif success_rate >= 0.6:
+                    bucket["status"] = "warn"
+                else:
+                    bucket["status"] = "bad"
+            del bucket["_latency_sum"]
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for route in routes:
+        route_id = int(route["id"])
+        totals = totals_by_route[route_id]
+        total_calls = totals["total"]
+        success_rate = None if total_calls == 0 else round(totals["success"] / total_calls, 4)
+        avg_latency = None if total_calls == 0 else round(totals["latency_sum"] / total_calls)
+        model_group = normalize_model_group(route.get("model_group", ""), route.get("model_id", ""))
+        route_summary = {
+            "id": route_id,
+            "model_id": route.get("model_id", ""),
+            "display_name": route.get("display_name", ""),
+            "model_group": model_group,
+            "route_name": route.get("route_name", ""),
+            "route_status": route.get("status", "enabled"),
+            "provider_id": route.get("provider_id"),
+            "provider_name": route.get("provider_name", ""),
+            "provider_group": route.get("provider_group", ""),
+            "provider_base_url": route.get("provider_base_url", ""),
+            "provider_status": route.get("provider_status", "enabled"),
+            "weight": route.get("weight", 0),
+            "token_cost": route.get("token_cost", 0),
+            "success_rate": success_rate,
+            "total_calls": total_calls,
+            "success_count": totals["success"],
+            "failure_count": totals["failure"],
+            "avg_latency_ms": avg_latency,
+            "buckets": buckets_by_route[route_id],
+        }
+        groups.setdefault(route_summary["model_group"] or "chat", []).append(route_summary)
+
+    return {
+        "generated_at": end_time.isoformat(),
+        "window_hours": window_hours,
+        "bucket_minutes": bucket_minutes,
+        "bucket_count": bucket_count,
+        "groups": [
+            {"model_group": group_name, "routes": group_routes}
+            for group_name, group_routes in groups.items()
+        ],
+    }
+
+
 def list_active_announcements(db: sqlite3.Connection, license_key: str = "") -> list[dict[str, Any]]:
     timestamp = now_iso()
     rows = db.execute(
@@ -490,6 +1564,8 @@ def validate_license(db: sqlite3.Connection, payload: ActivationRequest) -> dict
     device_row = row_to_dict(
         db.execute("SELECT * FROM devices WHERE device_id = ?", (payload.device_id,)).fetchone()
     )
+    credit_account = serialize_credit_account(ensure_credit_account(db, payload.license_key), license_row)
+    db.commit()
     if device_row and device_row["status"] == "pending":
         return {
             "allowed": False,
@@ -500,6 +1576,7 @@ def validate_license(db: sqlite3.Connection, payload: ActivationRequest) -> dict
             "device": device_row,
             "version": get_version_info(db, payload.app_version),
             "announcements": list_active_announcements(db, payload.license_key),
+            "credits": credit_account,
         }
 
     return {
@@ -511,6 +1588,7 @@ def validate_license(db: sqlite3.Connection, payload: ActivationRequest) -> dict
         "device": device_row,
         "version": get_version_info(db, payload.app_version),
         "announcements": list_active_announcements(db, payload.license_key),
+        "credits": credit_account,
     }
 
 
@@ -541,6 +1619,421 @@ def update_check(app_version: str = "1.0.0") -> dict[str, Any]:
 def client_announcements(license_key: str = "") -> list[dict[str, Any]]:
     with get_db() as db:
         return list_active_announcements(db, license_key)
+
+
+@app.get("/client/model-health")
+def client_model_health() -> dict[str, Any]:
+    with get_db() as db:
+        health = build_model_health_summary(db)
+        safe_groups = []
+        for group in health["groups"]:
+            safe_groups.append(
+                {
+                    "model_group": group["model_group"],
+                    "routes": [
+                        {
+                            "model_id": route["model_id"],
+                            "display_name": route["display_name"],
+                            "model_group": route["model_group"],
+                            "route_name": route["route_name"],
+                            "route_status": route["route_status"],
+                            "provider_name": route["provider_name"],
+                            "provider_base_url": route["provider_base_url"],
+                            "provider_status": route["provider_status"],
+                            "success_rate": route["success_rate"],
+                            "total_calls": route["total_calls"],
+                            "avg_latency_ms": route["avg_latency_ms"],
+                            "buckets": [
+                                {
+                                    "index": bucket["index"],
+                                    "status": bucket["status"],
+                                    "total": bucket["total"],
+                                }
+                                for bucket in route["buckets"]
+                            ],
+                        }
+                        for route in group["routes"]
+                    ],
+                }
+            )
+        return {
+            "generated_at": health["generated_at"],
+            "window_hours": health["window_hours"],
+            "bucket_minutes": health["bucket_minutes"],
+            "bucket_count": health["bucket_count"],
+            "groups": safe_groups,
+        }
+
+
+@app.post("/client/model-call-logs")
+def client_model_call_log(payload: ModelCallLogCreateRequest) -> dict[str, Any]:
+    with get_db() as db:
+        result = record_model_call_log(db, payload)
+        db.commit()
+        return result
+
+
+@app.get("/client/credits")
+def client_credits(license_key: str, device_id: str) -> dict[str, Any]:
+    with get_db() as db:
+        license_row, _device_row = validate_credit_device(db, license_key, device_id)
+        account = ensure_credit_account(db, license_key)
+        db.commit()
+        return serialize_credit_account(account, license_row)
+
+
+@app.post("/client/credits/quote")
+def client_credit_quote(payload: ClientCreditBaseRequest) -> dict[str, Any]:
+    with get_db() as db:
+        license_row, _device_row = validate_credit_device(db, payload.license_key, payload.device_id)
+        account = ensure_credit_account(db, payload.license_key)
+        quote = build_credit_quote(db, payload)
+        account_view = serialize_credit_account(account, license_row)
+        estimated = int(quote["estimated_credits"])
+        required = required_credit_balance(estimated)
+        return {
+            **quote,
+            "required_credits": required,
+            "min_run_credits": MIN_RUN_CREDITS,
+            "account": account_view,
+            "allowed": account_view["status"] == "enabled" and account_view["available_balance"] >= required,
+            "shortfall": max(0, required - account_view["available_balance"]),
+        }
+
+
+@app.post("/client/credits/reserve")
+def client_credit_reserve(payload: ClientCreditReserveRequest) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        license_row, _device_row = validate_credit_device(db, payload.license_key, payload.device_id)
+        account = ensure_credit_account(db, payload.license_key)
+        if account.get("status") != "enabled":
+            raise HTTPException(status_code=402, detail="Credit account disabled")
+
+        quote = build_credit_quote(db, payload)
+        estimated = int(payload.estimated_credits or quote["estimated_credits"])
+        estimated = max(1, estimated)
+        required = required_credit_balance(estimated)
+        available = int(account.get("balance") or 0) - int(account.get("reserved_balance") or 0)
+        if available < required:
+            raise HTTPException(
+                status_code=402,
+                detail=f"余额不足：本次预计消耗 {estimated} 代币，启动前至少需要 {required} 代币，当前可用 {max(0, available)} 代币",
+            )
+
+        route = quote.get("route") or {}
+        cursor = db.execute(
+            """
+            INSERT INTO credit_transactions
+              (license_key, amount, reserved_amount, settled_amount, transaction_type, status,
+               reason, route_id, device_id, model_id, model_group, node_type, request_id,
+               metadata_json, created_at, updated_at)
+            VALUES (?, 0, ?, 0, 'reserve', 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.license_key,
+                estimated,
+                "Node execution reserve",
+                route.get("id"),
+                payload.device_id,
+                payload.model_id.strip() or route.get("model_id", ""),
+                payload.model_group.strip() or route.get("model_group", ""),
+                payload.node_type.strip(),
+                payload.request_id.strip(),
+                json.dumps({"quote": quote}, ensure_ascii=False),
+                timestamp,
+                timestamp,
+            ),
+        )
+        db.execute(
+            """
+            UPDATE credit_accounts
+            SET reserved_balance = reserved_balance + ?, updated_at = ?
+            WHERE license_key = ?
+            """,
+            (estimated, timestamp, payload.license_key),
+        )
+        db.commit()
+        account = ensure_credit_account(db, payload.license_key)
+        return {
+            "transaction_id": int(cursor.lastrowid),
+            "reserved_credits": estimated,
+            "estimated_credits": estimated,
+            "required_credits": required,
+            "min_run_credits": MIN_RUN_CREDITS,
+            "route": route,
+            "account": serialize_credit_account(account, license_row),
+        }
+
+
+@app.post("/client/credits/settle")
+def client_credit_settle(payload: ClientCreditSettleRequest) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        license_row, _device_row = validate_credit_device(db, payload.license_key, payload.device_id)
+        account = ensure_credit_account(db, payload.license_key)
+        tx = row_to_dict(
+            db.execute(
+                "SELECT * FROM credit_transactions WHERE id = ? AND license_key = ?",
+                (payload.transaction_id, payload.license_key),
+            ).fetchone()
+        )
+        if not tx:
+            raise HTTPException(status_code=404, detail="Credit transaction not found")
+        if tx.get("status") != "reserved":
+            account_view = serialize_credit_account(account, license_row)
+            return {"already_finalized": True, "transaction": tx, "account": account_view}
+
+        reserved = int(tx.get("reserved_amount") or 0)
+        actual = max(0, int(payload.actual_credits if payload.actual_credits is not None else reserved))
+        available_after_release = int(account.get("balance") or 0) - (int(account.get("reserved_balance") or 0) - reserved)
+        if actual > available_after_release:
+            raise HTTPException(status_code=402, detail="Credit balance is insufficient for settlement")
+
+        db.execute(
+            """
+            UPDATE credit_accounts
+            SET balance = balance - ?,
+                reserved_balance = MAX(0, reserved_balance - ?),
+                lifetime_spent = lifetime_spent + ?,
+                updated_at = ?
+            WHERE license_key = ?
+            """,
+            (actual, reserved, actual, timestamp, payload.license_key),
+        )
+        db.execute(
+            """
+            UPDATE credit_transactions
+            SET amount = ?,
+                settled_amount = ?,
+                status = ?,
+                transaction_type = 'settlement',
+                reason = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (-actual, actual, "settled" if payload.success else "failed_settled", payload.reason.strip() or "Node execution settled", timestamp, payload.transaction_id),
+        )
+        db.commit()
+        account = ensure_credit_account(db, payload.license_key)
+        return {
+            "settled_credits": actual,
+            "released_credits": max(0, reserved - actual),
+            "account": serialize_credit_account(account, license_row),
+        }
+
+
+@app.post("/client/credits/refund")
+def client_credit_refund(payload: ClientCreditRefundRequest) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        license_row, _device_row = validate_credit_device(db, payload.license_key, payload.device_id)
+        account = ensure_credit_account(db, payload.license_key)
+        tx = row_to_dict(
+            db.execute(
+                "SELECT * FROM credit_transactions WHERE id = ? AND license_key = ?",
+                (payload.transaction_id, payload.license_key),
+            ).fetchone()
+        )
+        if not tx:
+            raise HTTPException(status_code=404, detail="Credit transaction not found")
+        if tx.get("status") != "reserved":
+            return {
+                "already_finalized": True,
+                "transaction": tx,
+                "account": serialize_credit_account(account, license_row),
+            }
+
+        reserved = int(tx.get("reserved_amount") or 0)
+        db.execute(
+            """
+            UPDATE credit_accounts
+            SET reserved_balance = MAX(0, reserved_balance - ?), updated_at = ?
+            WHERE license_key = ?
+            """,
+            (reserved, timestamp, payload.license_key),
+        )
+        db.execute(
+            """
+            UPDATE credit_transactions
+            SET status = 'refunded',
+                reason = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (payload.reason.strip() or "Node execution failed; reserve refunded", timestamp, payload.transaction_id),
+        )
+        db.commit()
+        account = ensure_credit_account(db, payload.license_key)
+        return {
+            "refunded_credits": reserved,
+            "account": serialize_credit_account(account, license_row),
+        }
+
+
+@app.post("/client/execute")
+def client_execute_node(payload: ClientExecuteRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    model_id = infer_execute_model_id(payload)
+    model_group = infer_execute_model_group(payload.node_type, payload.model_group)
+    if not model_id:
+        raise HTTPException(status_code=400, detail="缺少模型 ID，无法选择平台线路")
+
+    normalized_payload = ClientExecuteRequest(
+        license_key=payload.license_key,
+        device_id=payload.device_id,
+        model_id=model_id,
+        model_group=model_group,
+        node_type=payload.node_type,
+        route_id=payload.route_id,
+        node_id=payload.node_id,
+        config=payload.config,
+        inputs=payload.inputs,
+        request_id=payload.request_id or payload.node_id,
+    )
+
+    transaction_id: int | None = None
+    reserved_credits = 0
+    route: dict[str, Any] | None = None
+    license_row: dict[str, Any] | None = None
+
+    with get_db() as db:
+        license_row, _device_row = validate_credit_device(db, normalized_payload.license_key, normalized_payload.device_id)
+        route = find_executable_model_route(db, model_id, normalized_payload.route_id, model_group)
+        if not route:
+            raise HTTPException(status_code=404, detail=f"平台还没有为模型 {model_id} 配置可用线路，请先在母版添加模型线路")
+
+        if not str(route.get("provider_base_url") or "").strip():
+            raise HTTPException(status_code=400, detail="平台线路缺少 Base URL，请在母版供货商配置中补充")
+        if not str(route.get("provider_api_key") or "").strip():
+            raise HTTPException(status_code=400, detail="平台线路缺少 API Key，请在母版供货商配置中补充")
+
+        credit_payload = ClientCreditBaseRequest(
+            license_key=normalized_payload.license_key,
+            device_id=normalized_payload.device_id,
+            model_id=model_id,
+            model_group=model_group,
+            node_type=normalized_payload.node_type,
+            route_id=int(route["id"]),
+        )
+        quote = build_credit_quote(db, credit_payload)
+        transaction_id, reserved_credits, account_view = reserve_credit_for_execute(
+            db,
+            normalized_payload.license_key,
+            normalized_payload.device_id,
+            normalized_payload,
+            quote,
+            license_row,
+        )
+
+    try:
+        result = call_execute_backend(normalized_payload, route)
+    except HTTPException as error:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        with get_db() as db:
+            account_view = refund_reserved_credit(
+                db,
+                normalized_payload.license_key,
+                transaction_id,
+                str(error.detail),
+                license_row or {},
+            ) if transaction_id else serialize_credit_account(ensure_credit_account(db, normalized_payload.license_key), license_row or {})
+            record_model_call_log(
+                db,
+                ModelCallLogCreateRequest(
+                    route_id=int(route["id"]) if route else None,
+                    provider_id=int(route["provider_id"]) if route else None,
+                    license_key=normalized_payload.license_key,
+                    device_id=normalized_payload.device_id,
+                    model_id=model_id,
+                    model_group=model_group,
+                    node_type=normalized_payload.node_type,
+                    success=False,
+                    latency_ms=latency_ms,
+                    error_code=f"HTTP_{error.status_code}",
+                    error_message=str(error.detail),
+                    tokens_charged=0,
+                ),
+            )
+            db.commit()
+        raise
+    except Exception as error:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        with get_db() as db:
+            account_view = refund_reserved_credit(
+                db,
+                normalized_payload.license_key,
+                transaction_id,
+                str(error),
+                license_row or {},
+            ) if transaction_id else serialize_credit_account(ensure_credit_account(db, normalized_payload.license_key), license_row or {})
+            record_model_call_log(
+                db,
+                ModelCallLogCreateRequest(
+                    route_id=int(route["id"]) if route else None,
+                    provider_id=int(route["provider_id"]) if route else None,
+                    license_key=normalized_payload.license_key,
+                    device_id=normalized_payload.device_id,
+                    model_id=model_id,
+                    model_group=model_group,
+                    node_type=normalized_payload.node_type,
+                    success=False,
+                    latency_ms=latency_ms,
+                    error_code="PROXY_ERROR",
+                    error_message=str(error),
+                    tokens_charged=0,
+                ),
+            )
+            db.commit()
+        raise HTTPException(status_code=502, detail=f"平台代理执行失败：{error}") from error
+
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    with get_db() as db:
+        account_view = settle_reserved_credit(
+            db,
+            normalized_payload.license_key,
+            transaction_id,
+            reserved_credits,
+            "Client proxy execution completed",
+            license_row or {},
+        ) if transaction_id else serialize_credit_account(ensure_credit_account(db, normalized_payload.license_key), license_row or {})
+        record_model_call_log(
+            db,
+            ModelCallLogCreateRequest(
+                route_id=int(route["id"]) if route else None,
+                provider_id=int(route["provider_id"]) if route else None,
+                license_key=normalized_payload.license_key,
+                device_id=normalized_payload.device_id,
+                model_id=model_id,
+                model_group=model_group,
+                node_type=normalized_payload.node_type,
+                success=True,
+                latency_ms=latency_ms,
+                tokens_charged=reserved_credits,
+            ),
+        )
+        db.commit()
+
+    return {
+        "output": result.get("output"),
+        "meta": {
+            **(result.get("meta") if isinstance(result.get("meta"), dict) else {}),
+            "modelId": model_id,
+            "routeId": int(route["id"]) if route else None,
+            "routeName": route.get("route_name") if route else "",
+            "platformProxy": True,
+        },
+        "route": {
+            "id": int(route["id"]) if route else None,
+            "model_id": model_id,
+            "display_name": route.get("display_name") if route else "",
+            "route_name": route.get("route_name") if route else "",
+            "model_group": model_group,
+            "token_cost": int(route.get("token_cost") or 0) if route else 0,
+        },
+        "account": account_view,
+        "credits": account_view,
+    }
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -711,7 +2204,9 @@ def list_licenses() -> list[dict[str, Any]]:
             ORDER BY created_at DESC
             """
         ).fetchall()
-        return [dict(row) for row in rows]
+        results = [attach_credit_to_license(db, row) for row in rows]
+        db.commit()
+        return results
 
 
 @app.post("/admin/licenses", dependencies=[Depends(require_admin)])
@@ -738,10 +2233,13 @@ def create_license(payload: LicenseCreateRequest) -> dict[str, Any]:
                     timestamp,
                 ),
             )
+            ensure_credit_account(db, key)
+            grant_initial_credits(db, key, int(payload.initial_credits or 0), timestamp)
             db.commit()
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="License key already exists") from exc
-        return row_to_dict(db.execute("SELECT * FROM licenses WHERE license_key = ?", (key,)).fetchone()) or {}
+        row = db.execute("SELECT * FROM licenses WHERE license_key = ?", (key,)).fetchone()
+        return attach_credit_to_license(db, row) if row else {}
 
 
 @app.patch("/admin/licenses/{license_key}", dependencies=[Depends(require_admin)])
@@ -762,7 +2260,7 @@ def update_license(license_key: str, payload: LicenseUpdateRequest) -> dict[str,
         row = row_to_dict(db.execute("SELECT * FROM licenses WHERE license_key = ?", (license_key,)).fetchone())
         if not row:
             raise HTTPException(status_code=404, detail="License not found")
-        return row
+        return attach_credit_to_license(db, row)
 
 
 @app.get("/admin/devices", dependencies=[Depends(require_admin)])
@@ -838,6 +2336,94 @@ def delete_device(device_id: str) -> dict[str, Any]:
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Device not found")
         return {"deleted": True, "device_id": device_id}
+
+
+@app.get("/admin/credits/accounts", dependencies=[Depends(require_admin)])
+def list_credit_accounts() -> list[dict[str, Any]]:
+    with get_db() as db:
+        license_rows = db.execute("SELECT * FROM licenses ORDER BY created_at DESC").fetchall()
+        results: list[dict[str, Any]] = []
+        for license_row in license_rows:
+            account = ensure_credit_account(db, license_row["license_key"])
+            results.append(serialize_credit_account(account, dict(license_row)))
+        db.commit()
+        return results
+
+
+@app.post("/admin/credits/adjust", dependencies=[Depends(require_admin)])
+def adjust_credit_account(payload: CreditAdjustRequest) -> dict[str, Any]:
+    if payload.amount == 0:
+        raise HTTPException(status_code=400, detail="Amount must not be zero")
+
+    timestamp = now_iso()
+    with get_db() as db:
+        account = ensure_credit_account(db, payload.license_key)
+        next_balance = int(account.get("balance") or 0) + payload.amount
+        if next_balance < int(account.get("reserved_balance") or 0):
+            raise HTTPException(status_code=400, detail="Balance cannot be lower than reserved credits")
+
+        lifetime_field = "lifetime_granted" if payload.amount > 0 else None
+        db.execute(
+            f"""
+            UPDATE credit_accounts
+            SET balance = ?,
+                {f"{lifetime_field} = {lifetime_field} + ?," if lifetime_field else ""}
+                updated_at = ?
+            WHERE license_key = ?
+            """,
+            ([next_balance, abs(payload.amount), timestamp, payload.license_key] if lifetime_field else [next_balance, timestamp, payload.license_key]),
+        )
+        db.execute(
+            """
+            INSERT INTO credit_transactions
+              (license_key, amount, reserved_amount, settled_amount, transaction_type, status,
+               reason, route_id, device_id, model_id, model_group, node_type, request_id,
+               metadata_json, created_at, updated_at)
+            VALUES (?, ?, 0, ?, 'adjustment', 'settled', ?, NULL, '', '', '', '', '', '{}', ?, ?)
+            """,
+            (
+                payload.license_key,
+                payload.amount,
+                max(0, -payload.amount),
+                payload.reason.strip() or "Admin adjustment",
+                timestamp,
+                timestamp,
+            ),
+        )
+        db.commit()
+        account = ensure_credit_account(db, payload.license_key)
+        license_row = row_to_dict(db.execute("SELECT * FROM licenses WHERE license_key = ?", (payload.license_key,)).fetchone())
+        return serialize_credit_account(account, license_row)
+
+
+@app.get("/admin/credits/transactions", dependencies=[Depends(require_admin)])
+def list_credit_transactions(license_key: str = "", limit: int = 80) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 80), 300))
+    with get_db() as db:
+        if license_key:
+            rows = db.execute(
+                """
+                SELECT credit_transactions.*, licenses.customer_name
+                FROM credit_transactions
+                LEFT JOIN licenses ON licenses.license_key = credit_transactions.license_key
+                WHERE credit_transactions.license_key = ?
+                ORDER BY credit_transactions.id DESC
+                LIMIT ?
+                """,
+                (license_key, safe_limit),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                """
+                SELECT credit_transactions.*, licenses.customer_name
+                FROM credit_transactions
+                LEFT JOIN licenses ON licenses.license_key = credit_transactions.license_key
+                ORDER BY credit_transactions.id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [serialize_credit_transaction(row) for row in rows]
 
 
 @app.get("/admin/version", dependencies=[Depends(require_admin)])
@@ -1080,3 +2666,185 @@ def delete_announcement(announcement_id: int) -> dict[str, Any]:
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Announcement not found")
         return {"deleted": True, "id": announcement_id}
+
+
+@app.get("/admin/model-providers", dependencies=[Depends(require_admin)])
+def list_model_providers() -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT model_providers.*,
+              (SELECT COUNT(*) FROM model_routes WHERE model_routes.provider_id = model_providers.id) AS route_count
+            FROM model_providers
+            ORDER BY status DESC, priority ASC, updated_at DESC, id DESC
+            """
+        ).fetchall()
+        return [serialize_model_provider(row) for row in rows]
+
+
+@app.post("/admin/model-providers", dependencies=[Depends(require_admin)])
+def create_model_provider(payload: ModelProviderCreateRequest) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        cursor = db.execute(
+            """
+            INSERT INTO model_providers
+              (name, group_name, provider_type, base_url, api_key_cipher, supported_models,
+               status, priority, cost_multiplier, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.name.strip(),
+                normalize_text(payload.group_name, "General") or "General",
+                normalize_text(payload.provider_type, "openai-compatible") or "openai-compatible",
+                payload.base_url.strip(),
+                payload.api_key.strip(),
+                payload.supported_models.strip(),
+                normalize_model_status(payload.status),
+                payload.priority,
+                payload.cost_multiplier,
+                payload.notes.strip(),
+                timestamp,
+                timestamp,
+            ),
+        )
+        db.commit()
+        row = db.execute("SELECT * FROM model_providers WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return serialize_model_provider(row) if row else {}
+
+
+@app.patch("/admin/model-providers/{provider_id}", dependencies=[Depends(require_admin)])
+def update_model_provider(provider_id: int, payload: ModelProviderUpdateRequest) -> dict[str, Any]:
+    fields = payload.model_dump(exclude_unset=True)
+    if "status" in fields and fields["status"] is not None:
+        fields["status"] = normalize_model_status(fields["status"])
+    for key in ("name", "group_name", "provider_type", "base_url", "supported_models", "notes"):
+        if key in fields and fields[key] is not None:
+            fields[key] = fields[key].strip()
+    if "api_key" in fields:
+        fields["api_key_cipher"] = (fields.pop("api_key") or "").strip()
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    fields["updated_at"] = now_iso()
+    setters = ", ".join(f"{key} = ?" for key in fields)
+    values = list(fields.values()) + [provider_id]
+    with get_db() as db:
+        cursor = db.execute(f"UPDATE model_providers SET {setters} WHERE id = ?", values)
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        db.commit()
+        row = db.execute("SELECT * FROM model_providers WHERE id = ?", (provider_id,)).fetchone()
+        return serialize_model_provider(row) if row else {}
+
+
+@app.get("/admin/model-routes", dependencies=[Depends(require_admin)])
+def list_model_routes() -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT model_routes.*,
+              model_providers.name AS provider_name,
+              model_providers.group_name AS provider_group,
+              model_providers.status AS provider_status
+            FROM model_routes
+            JOIN model_providers ON model_providers.id = model_routes.provider_id
+            ORDER BY model_routes.model_group ASC, model_routes.model_id ASC, model_routes.weight DESC, model_routes.id DESC
+            """
+        ).fetchall()
+        return [serialize_model_route(row) for row in rows]
+
+
+@app.post("/admin/model-routes", dependencies=[Depends(require_admin)])
+def create_model_route(payload: ModelRouteCreateRequest) -> dict[str, Any]:
+    timestamp = now_iso()
+    with get_db() as db:
+        ensure_provider_exists(db, payload.provider_id)
+        cursor = db.execute(
+            """
+            INSERT INTO model_routes
+              (model_id, display_name, model_group, provider_id, route_name, status,
+               weight, token_cost, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.model_id.strip(),
+                payload.display_name.strip(),
+                normalize_model_group(payload.model_group, payload.model_id),
+                payload.provider_id,
+                payload.route_name.strip(),
+                normalize_model_status(payload.status),
+                payload.weight,
+                payload.token_cost,
+                payload.notes.strip(),
+                timestamp,
+                timestamp,
+            ),
+        )
+        db.commit()
+        row = db.execute(
+            """
+            SELECT model_routes.*,
+              model_providers.name AS provider_name,
+              model_providers.group_name AS provider_group,
+              model_providers.status AS provider_status
+            FROM model_routes
+            JOIN model_providers ON model_providers.id = model_routes.provider_id
+            WHERE model_routes.id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+        return serialize_model_route(row) if row else {}
+
+
+@app.patch("/admin/model-routes/{route_id}", dependencies=[Depends(require_admin)])
+def update_model_route(route_id: int, payload: ModelRouteUpdateRequest) -> dict[str, Any]:
+    fields = payload.model_dump(exclude_unset=True)
+    if "status" in fields and fields["status"] is not None:
+        fields["status"] = normalize_model_status(fields["status"])
+    for key in ("model_id", "display_name", "model_group", "route_name", "notes"):
+        if key in fields and fields[key] is not None:
+            fields[key] = fields[key].strip()
+    if "model_group" in fields and fields["model_group"] is not None:
+        fields["model_group"] = normalize_model_group(
+            fields["model_group"],
+            fields.get("model_id") or "",
+        )
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    fields["updated_at"] = now_iso()
+    setters = ", ".join(f"{key} = ?" for key in fields)
+    values = list(fields.values()) + [route_id]
+    with get_db() as db:
+        if "provider_id" in fields and fields["provider_id"] is not None:
+            ensure_provider_exists(db, int(fields["provider_id"]))
+        cursor = db.execute(f"UPDATE model_routes SET {setters} WHERE id = ?", values)
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Route not found")
+        db.commit()
+        row = db.execute(
+            """
+            SELECT model_routes.*,
+              model_providers.name AS provider_name,
+              model_providers.group_name AS provider_group,
+              model_providers.status AS provider_status
+            FROM model_routes
+            JOIN model_providers ON model_providers.id = model_routes.provider_id
+            WHERE model_routes.id = ?
+            """,
+            (route_id,),
+        ).fetchone()
+        return serialize_model_route(row) if row else {}
+
+
+@app.get("/admin/model-health", dependencies=[Depends(require_admin)])
+def get_model_health() -> dict[str, Any]:
+    with get_db() as db:
+        return build_model_health_summary(db)
+
+
+@app.post("/admin/model-call-logs", dependencies=[Depends(require_admin)])
+def create_model_call_log(payload: ModelCallLogCreateRequest) -> dict[str, Any]:
+    with get_db() as db:
+        result = record_model_call_log(db, payload)
+        db.commit()
+        return result

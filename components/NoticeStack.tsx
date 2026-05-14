@@ -42,6 +42,18 @@ export const NoticeStack: React.FC = () => {
           >
             <Icon size={16} className={`mt-0.5 shrink-0 ${config.iconClass}`} />
             <p className="text-xs font-bold tracking-tight leading-relaxed flex-1">{notice.message}</p>
+            {notice.actionLabel && notice.action && (
+              <button
+                type="button"
+                onClick={() => {
+                  notice.action?.();
+                  removeNotice(notice.id);
+                }}
+                className="shrink-0 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-black text-white shadow-sm transition-colors hover:bg-white/20"
+              >
+                {notice.actionLabel}
+              </button>
+            )}
             <button
               onClick={() => removeNotice(notice.id)}
               className="p-1 rounded-lg hover:bg-black/20 transition-colors"

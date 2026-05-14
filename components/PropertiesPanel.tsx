@@ -7,26 +7,60 @@ import { SecurityModal } from './SecurityModal';
 import { X, Settings2, Sliders, Type, Info, Copy, Check, Eye, EyeOff, Maximize2, Lock, Play } from 'lucide-react';
 import { verifyVaultPassword } from '../config/security';
 import { getModelCapabilities } from '../config/modelCapabilities';
+import { buildCanvasFontPrompt, CANVAS_FONTS, DEFAULT_CANVAS_FONT_ID, ensureCanvasFontsLoaded, getCanvasFontById, getCanvasFontStack } from '../services/fontRegistry';
 
 interface PropertiesPanelProps {
   dockMode?: boolean;
   onClose?: () => void;
 }
 
+const formatLargeStringPreview = (value: string) => {
+  const sizeKb = Math.round((value.length * 0.75) / 1024);
+  if (value.startsWith('data:image/')) {
+    const mime = value.slice(5, value.indexOf(';') > 0 ? value.indexOf(';') : 32);
+    return `[${mime} base64 data omitted · about ${sizeKb} KB]`;
+  }
+  if (value.length > 1200) {
+    return `${value.slice(0, 520)}\n...[omitted ${value.length - 1040} chars]...\n${value.slice(-520)}`;
+  }
+  return value;
+};
+
+const stringifyOutputPreview = (output: unknown) => {
+  if (!output || typeof output === 'string') return '';
+  const seen = new WeakSet<object>();
+  try {
+    const preview = JSON.stringify(output, (key, value) => {
+      if (typeof value === 'string') {
+        return formatLargeStringPreview(value);
+      }
+      if (value && typeof value === 'object') {
+        if (seen.has(value)) return '[Circular]';
+        seen.add(value);
+      }
+      return value;
+    }, 2);
+    return preview.length > 16000
+      ? `${preview.slice(0, 16000)}\n...[output preview truncated]`
+      : preview;
+  } catch {
+    return String(output);
+  }
+};
+
 export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ dockMode = false, onClose }) => {
   const { nodes, selectedNodeId, updateNodeData, onSelectionChange, applyPromptTemplateToNode, isPromptVaultUnlocked, setPromptVaultUnlocked, pushNotice, apiProviders, activeProviderId, activeProviderIds } = useStore();
   const [copied, setCopied] = React.useState(false);
   const [showUnlockModal, setShowUnlockModal] = React.useState(false);
 
+  React.useEffect(() => {
+    void ensureCanvasFontsLoaded();
+  }, []);
+
   const selectedNode = nodes.find(n => n.id === selectedNodeId);
   const objectOutputPreview = React.useMemo(() => {
     const output = selectedNode?.data.output;
-    if (!output || typeof output === 'string') return '';
-    try {
-      return JSON.stringify(output, null, 2);
-    } catch {
-      return String(output);
-    }
+    return stringifyOutputPreview(output);
   }, [selectedNode?.data.output]);
 
   if (!selectedNode) return null;
@@ -45,14 +79,17 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ dockMode = fal
     [NodeType.AI_IMAGE]: '图像生成',
     [NodeType.AI_AUDIO]: '音频生成',
     [NodeType.AI_VIDEO]: '视频生成',
+    [NodeType.DESIGN_BOARD]: '设计画板',
     [NodeType.OUTPUT]: '结果输出',
     [NodeType.GROUP]: '分组',
+    [NodeType.TEXT_RECOGNITION]: '文字识别',
   };
 
   const canRunSelectedNode = NODE_MODALITIES[selectedNode.data.type] === 'ai'
     || selectedNode.data.type === NodeType.TABLE_PARSE
     || selectedNode.data.type === NodeType.TASK_SELECT
-    || selectedNode.data.type === NodeType.BATCH_EXECUTE;
+    || selectedNode.data.type === NodeType.BATCH_EXECUTE
+    || selectedNode.data.type === NodeType.DESIGN_BOARD;
   const currentModality: ModelModality = selectedNode.data.type === NodeType.AI_CHAT || selectedNode.data.type === NodeType.PRODUCT_IMAGE_MATCH
     ? 'chat'
     : selectedNode.data.type === NodeType.AI_AUDIO
@@ -72,6 +109,15 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ dockMode = fal
   const isGptImage2Model = String(selectedNode.data.config?.modelId || '').toLowerCase().startsWith('gpt-image-2');
   const selectedAspectRatio = selectedNode.data.config.aspectRatio || '1:1';
   const isGptBannerAspectRatio = isGptImage2Model && selectedAspectRatio === '46:19';
+  const selectedTypographyFontId = String(selectedNode.data.config.typographyFontId || '').trim();
+  const typefacePromptEnabled = selectedNode.data.type === NodeType.AI_IMAGE
+    && selectedNode.data.config.enableTypefacePrompt === true;
+  const selectedTypographyFont = selectedTypographyFontId ? getCanvasFontById(selectedTypographyFontId) : null;
+  const typographyTextValue = String(selectedNode.data.config.typographyText || '').trim();
+  const typographyPromptPreview = selectedNode.data.type === NodeType.AI_IMAGE
+    ? buildCanvasFontPrompt(selectedTypographyFontId, typographyTextValue, typefacePromptEnabled)
+    : '';
+  const typographyPreviewText = typographyTextValue || selectedTypographyFont?.label || '新品上市';
 
   const isPromptProtected = selectedNode.data.type === NodeType.AI_CHAT && !isPromptVaultUnlocked;
   const hasImageReferenceInput = selectedNode.data.type === NodeType.AI_IMAGE && !!selectedNode.data.inputs?.image;
@@ -104,6 +150,19 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ dockMode = fal
         ...(isGptImage2Model && value === '46:19' && !['2K', '4K'].includes(selectedNode.data.config.imageSize || '')
           ? { imageSize: '2K' }
           : {}),
+      }
+    });
+  };
+
+  const handleTypefacePromptToggle = () => {
+    const nextEnabled = !typefacePromptEnabled;
+    updateNodeData(selectedNode.id, {
+      config: {
+        ...selectedNode.data.config,
+        enableTypefacePrompt: nextEnabled,
+        typographyFontId: nextEnabled
+          ? (selectedTypographyFontId || DEFAULT_CANVAS_FONT_ID)
+          : selectedTypographyFontId,
       }
     });
   };
@@ -360,6 +419,86 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({ dockMode = fal
                     </div>
                   </div>
                 )}
+
+                <div className="space-y-3 pt-2 border-t theme-border-subtle">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-fuchsia-500/10 text-fuchsia-300">
+                        <Type size={14} />
+                      </span>
+                      <div className="min-w-0">
+                        <span className="block text-xs theme-text-secondary font-medium">字体库约束</span>
+                        <span className="block truncate text-[9px] theme-text-muted">
+                          让出图提示词明确使用本地字体风格
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleTypefacePromptToggle}
+                      className={`shrink-0 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition-all ${typefacePromptEnabled
+                        ? 'border-fuchsia-400/40 bg-fuchsia-500/15 text-fuchsia-200'
+                        : 'theme-border-subtle theme-bg-input theme-text-muted hover:theme-border-strong'
+                        }`}
+                    >
+                      {typefacePromptEnabled ? '已开启' : '开启'}
+                    </button>
+                  </div>
+
+                  <div className={`grid grid-cols-1 gap-2 transition-opacity ${typefacePromptEnabled ? 'opacity-100' : 'opacity-55'}`}>
+                    <select
+                      className="w-full theme-bg-input border theme-border-subtle rounded-xl px-3 py-2.5 text-xs theme-text-primary focus:border-fuchsia-500 focus:ring-1 focus:ring-fuchsia-500/20 outline-none transition-all"
+                      value={selectedTypographyFontId}
+                      onChange={(e) => handleConfigChange('typographyFontId', e.target.value)}
+                      disabled={!typefacePromptEnabled}
+                    >
+                      <option value="">选择字体</option>
+                      {CANVAS_FONTS.map((font) => (
+                        <option key={font.id} value={font.id}>{font.label}</option>
+                      ))}
+                    </select>
+                    <input
+                      className="w-full theme-bg-input border theme-border-subtle rounded-xl px-3 py-2.5 text-xs theme-text-primary focus:border-fuchsia-500 focus:ring-1 focus:ring-fuchsia-500/20 outline-none transition-all"
+                      value={selectedNode.data.config.typographyText || ''}
+                      onChange={(e) => handleConfigChange('typographyText', e.target.value)}
+                      disabled={!typefacePromptEnabled}
+                      placeholder="主要文字，例如：618 大促"
+                    />
+                  </div>
+
+                  {typefacePromptEnabled && selectedTypographyFont && (
+                    <div className="rounded-xl border border-fuchsia-500/15 bg-fuchsia-500/[0.045] p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold theme-text-muted">字体预览</span>
+                        <span className="max-w-[150px] truncate text-[9px] text-fuchsia-300">{selectedTypographyFont.label}</span>
+                      </div>
+                      <div
+                        className="truncate text-[22px] leading-tight theme-text-primary"
+                        style={{ fontFamily: getCanvasFontStack(selectedTypographyFont.id) }}
+                      >
+                        {typographyPreviewText}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="rounded-xl border theme-border-subtle theme-bg-input p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold theme-text-muted">生成时追加</span>
+                      {typographyPromptPreview && (
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(typographyPromptPreview)}
+                          className="text-[9px] font-bold text-fuchsia-300 hover:text-fuchsia-200"
+                        >
+                          {copied ? '已复制' : '复制'}
+                        </button>
+                      )}
+                    </div>
+                    <p className="whitespace-pre-wrap text-[10px] leading-relaxed theme-text-muted">
+                      {typographyPromptPreview || '开启后会把字体名称、字形风格和主要文字写进出图提示词，后续重建文字层时优先使用同一字体。'}
+                    </p>
+                  </div>
+                </div>
 
                 <div className="space-y-3 pt-2 border-t theme-border-subtle">
                   <div className="flex items-center justify-between gap-3">

@@ -262,7 +262,8 @@ export const BaseNode: React.FC<BaseNodeProps> = ({ children, data, id, icon: Ic
     || data.type === NodeType.TABLE_PARSE
     || data.type === NodeType.TASK_SELECT
     || data.type === NodeType.BATCH_EXECUTE
-    || data.type === NodeType.STYLE_GUIDE;
+    || data.type === NodeType.STYLE_GUIDE
+    || data.type === NodeType.DESIGN_BOARD;
   const isAdjacent = !!selectedNodeId && selectedNodeId !== id && edges.some((edge) => (
     (edge.source === selectedNodeId && edge.target === id)
     || (edge.target === selectedNodeId && edge.source === id)
@@ -542,10 +543,10 @@ export const BaseNode: React.FC<BaseNodeProps> = ({ children, data, id, icon: Ic
           </div>
         )}
 
-        {data.status === 'running' && (data.type === NodeType.AI_IMAGE || data.type === NodeType.AI_VIDEO) && (
+        {data.status === 'running' && (data.type === NodeType.AI_IMAGE || data.type === NodeType.AI_VIDEO || data.type === NodeType.TEXT_RECOGNITION || data.type === NodeType.DESIGN_BOARD) && (
           <div className="canvas-node-progress border-b px-4 py-2">
             <div className="flex items-center justify-between text-[9px] font-bold">
-              <span>异步任务处理中</span>
+              <span>{data.meta?.progressLabel || '异步任务处理中'}</span>
               <span>{Math.max(1, Math.min(99, Math.floor(data.progress || 1)))}%</span>
             </div>
             <div className="canvas-node-progress-track mt-1 h-1.5 overflow-hidden rounded-full border theme-bg-input">

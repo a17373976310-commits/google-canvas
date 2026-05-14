@@ -11,6 +11,7 @@ import {
 import { BaseNode } from '../BaseNode';
 import { NodeData, SpreadsheetParseOutput } from '../../types';
 import { useStore } from '../../store';
+import { isAdminEdition } from '../../config/appEdition';
 
 const DEFAULT_TEXT_COLUMNS = 'E,F,G';
 const PREVIEW_LIMIT = 10;
@@ -47,6 +48,7 @@ export const TableParseNode: React.FC<NodeProps<NodeData>> = ({ id, data, select
         () => apiProviders.find((provider) => provider.id === (activeProviderIds?.chat || activeProviderId))?.name || '当前推理供货商',
         [activeProviderId, activeProviderIds?.chat, apiProviders]
     );
+    const displayProviderName = isAdminEdition ? activeProviderName : '平台线路';
     const sheetCount = Math.max(1, Number(output?.sheetCount || output?.sheetNames?.length || 1));
     const multiSheet = sheetCount > 1;
     const summarySheetName = output?.sheetName || String(data.config.sheetName || 'auto');
@@ -166,7 +168,7 @@ export const TableParseNode: React.FC<NodeProps<NodeData>> = ({ id, data, select
                                 {effectiveSmartModelId || '请先在左侧模型库选择一个对话模型'}
                             </div>
                             <div className="mt-1 text-[9px] theme-text-muted">
-                                当前提供商：{activeProviderName}。智能拆解需要对话模型支持图片输入；不确定时建议使用“自动兜底”。
+                                当前提供商：{displayProviderName}。智能拆解需要对话模型支持图片输入；不确定时建议使用“自动兜底”。
                             </div>
                         </div>
 

@@ -20,6 +20,7 @@ dist-ssr
 backend/.venv
 license_server/.venv
 license_server/*.db
+dev-license.db
 backend/uploads
 backend/history/images/
 output/

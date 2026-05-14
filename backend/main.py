@@ -939,6 +939,8 @@ def collect_image_inputs(image_input: Any) -> List[str]:
                 push(value.get("url"))
                 push(value.get("data"))
                 push(value.get("previewData"))
+            for direct_key in ("primaryUrl", "previewDataUrl", "url", "data"):
+                push(value.get(direct_key))
 
             for key in ("selectedImages", "image", "images", "referenceImages", "embeddedImages"):
                 nested = value.get(key)

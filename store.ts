@@ -1,4 +1,4 @@
-﻿
+
 import { create } from 'zustand';
 import {
   Connection,
@@ -11,14 +11,28 @@ import {
   applyNodeChanges
 } from 'reactflow';
 import * as XLSX from 'xlsx';
-import { APIProvider, CanvasState, NodeType, NodeData, NODE_MODALITIES, NodeCapability, LogEntry, LogLevel, SavedWorkflow, RegisteredModel, Notice, ModelModality, ModelApplyScope, ImageHistoryItem, SpreadsheetParseOutput, SpreadsheetParseTask, StandardFilePayload, TaskSelectionOutput, TaskSelectionTask, BatchExecutionOutput, BatchExecutionItem, BatchImageResult, TaskVisualSpec, ProductImageMatchOutput, ProductImageCandidateAnalysis, StyleGuideOutput, CanonicalImageResult } from './types';
+import { APIProvider, CanvasState, NodeType, NodeData, NODE_MODALITIES, NodeCapability, LogEntry, LogLevel, SavedWorkflow, RegisteredModel, Notice, ModelModality, ModelApplyScope, ImageHistoryItem, SpreadsheetParseOutput, SpreadsheetParseTask, StandardFilePayload, TaskSelectionOutput, TaskSelectionTask, BatchExecutionOutput, BatchExecutionItem, BatchImageResult, TaskVisualSpec, ProductImageMatchOutput, ProductImageCandidateAnalysis, StyleGuideOutput, CanonicalImageResult, DesignBoardTextLayer, TextRecognitionOutput, DesignBoardConfig, CanvasViewport } from './types';
 import { v4 as uuidv4 } from 'uuid';
 import { AIService } from './services/aiService';
 import { getModelCapabilities } from './config/modelCapabilities';
+import { isAdminEdition } from './config/appEdition';
 import { inferConnectionHandles } from './config/nodeSpecs';
 import { normalizeImageSrc } from './utils/normalizeImageSrc';
+import { buildDesignBoardOutput, createDefaultDesignBoardConfig, createDesignBoardTextLayer, normalizeDesignBoardConfig } from './utils/designBoard';
+import { renderDesignBoardToDataUrl } from './utils/designBoardRenderer';
 import { DEFAULT_CHAT_PROMPT_TEMPLATE } from './config/promptTemplates';
+import { buildCanvasFontPrompt, CANVAS_FONTS, DEFAULT_CANVAS_FONT_ID, getCanvasFontById } from './services/fontRegistry';
 import { ensureClientLicenseFresh } from './services/licenseClientApi';
+import {
+  fetchBestRouteSuggestion,
+  findLocalProviderForRoute,
+  formatRouteSuccessRate,
+  getModalityForNodeType as getRouteModalityForNodeType,
+  getRouteDisplayName,
+  MODEL_FIELD_BY_MODALITY,
+  splitProviderModels,
+  type EnrichedClientModelHealthRoute,
+} from './services/routeRecommendation';
 
 let stopExecutionRequested = false;
 const activeNodeAbortControllers = new Map<string, AbortController>();
@@ -48,6 +62,17 @@ const DEFAULT_PROVIDER_PRESETS: Partial<APIProvider>[] = [
     isDefault: true,
   },
 ];
+const routeFailureNoticeTimestamps = new Map<string, number>();
+const ROUTE_FAILURE_NOTICE_COOLDOWN_MS = 2 * 60 * 1000;
+const ROUTE_SUGGESTION_NODE_TYPES = new Set<NodeType>([
+  NodeType.AI_CHAT,
+  NodeType.AI_IMAGE,
+  NodeType.AI_AUDIO,
+  NodeType.AI_VIDEO,
+  NodeType.PRODUCT_IMAGE_MATCH,
+  NodeType.TEXT_RECOGNITION,
+  NodeType.TABLE_PARSE,
+]);
 
 const normalizeApiProvider = (provider: Partial<APIProvider> | null | undefined): APIProvider => ({
   id: provider?.id || uuidv4(),
@@ -208,10 +233,19 @@ const WORKFLOW_DB_NAME = 'ai_canvas_workflows_db';
 const WORKFLOW_STORE_NAME = 'workflow_payloads';
 const WORKFLOW_INDEX_KEY = 'saved_workflows';
 const WORKFLOW_LOCAL_PAYLOADS_KEY = 'saved_workflow_local_payloads';
+const WORKSPACE_DRAFT_ID = '__active_workspace_draft__';
+const WORKSPACE_DRAFT_LOCAL_KEY = 'active_workspace_draft_payload';
+const WORKSPACE_DRAFT_VERSION = 1;
 const IMAGE_HISTORY_STORAGE_KEY = 'image_history_items';
 const MAX_LOCAL_IMAGE_HISTORY_ITEMS = 2;
 
 type WorkflowPayload = { nodes: Node<NodeData>[]; edges: Edge[] };
+type WorkspaceDraftPayload = WorkflowPayload & {
+  version: number;
+  updatedAt: number;
+  selectedNodeId: string | null;
+  viewport?: CanvasViewport | null;
+};
 type LocalWorkflowPayloadMap = Record<string, WorkflowPayload>;
 
 const LEGACY_TEXT_FIXUPS: Record<string, string> = {
@@ -383,6 +417,11 @@ const syncLocalWorkflowPayloads = (workflows: SavedWorkflow[]) => {
 
 const openWorkflowDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB is not available.'));
+      return;
+    }
+
     const request = indexedDB.open(WORKFLOW_DB_NAME, 1);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -577,6 +616,108 @@ const persistWorkflowIndex = (workflows: SavedWorkflow[]) => {
 
 const clonePayload = (payload: WorkflowPayload) => {
   return normalizeWorkflowPayload(JSON.parse(JSON.stringify(payload)) as WorkflowPayload);
+};
+
+const sanitizeDraftNode = (node: Node<NodeData>): Node<NodeData> => {
+  if (node.data.status !== 'running') return node;
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      status: 'idle',
+      progress: undefined,
+      error: undefined,
+    },
+  };
+};
+
+const normalizeWorkspaceViewport = (viewport: unknown): CanvasViewport | null => {
+  if (!viewport || typeof viewport !== 'object') return null;
+  const raw = viewport as Partial<CanvasViewport>;
+  const x = Number(raw.x);
+  const y = Number(raw.y);
+  const zoom = Number(raw.zoom);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(zoom)) return null;
+  return {
+    x,
+    y,
+    zoom: Math.min(3, Math.max(0.05, zoom)),
+  };
+};
+
+const cloneWorkspaceDraft = (draft: Partial<WorkspaceDraftPayload> | null | undefined): WorkspaceDraftPayload | null => {
+  if (!draft || !Array.isArray(draft.nodes) || !Array.isArray(draft.edges)) return null;
+  const normalized = clonePayload({
+    nodes: draft.nodes,
+    edges: draft.edges,
+  });
+  const nodes = normalized.nodes.map(sanitizeDraftNode);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const selectedNodeId = draft.selectedNodeId && nodeIds.has(draft.selectedNodeId)
+    ? draft.selectedNodeId
+    : null;
+
+  return {
+    version: WORKSPACE_DRAFT_VERSION,
+    updatedAt: Number.isFinite(Number(draft.updatedAt)) ? Number(draft.updatedAt) : Date.now(),
+    selectedNodeId,
+    viewport: normalizeWorkspaceViewport(draft.viewport),
+    nodes,
+    edges: normalized.edges,
+  };
+};
+
+const saveWorkspaceDraftPayload = async (draft: WorkspaceDraftPayload) => {
+  const payload = cloneWorkspaceDraft(draft);
+  if (!payload) return;
+
+  try {
+    const db = await openWorkflowDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(WORKFLOW_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(WORKFLOW_STORE_NAME);
+      store.put(payload, WORKSPACE_DRAFT_ID);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    localStorage.removeItem(WORKSPACE_DRAFT_LOCAL_KEY);
+  } catch (err) {
+    try {
+      localStorage.setItem(WORKSPACE_DRAFT_LOCAL_KEY, JSON.stringify(payload));
+      return;
+    } catch (fallbackErr) {
+      throw fallbackErr || err;
+    }
+  }
+};
+
+const loadWorkspaceDraftPayload = async (): Promise<WorkspaceDraftPayload | null> => {
+  try {
+    const db = await openWorkflowDB();
+    const payload = await new Promise<WorkspaceDraftPayload | null>((resolve, reject) => {
+      const tx = db.transaction(WORKFLOW_STORE_NAME, 'readonly');
+      const store = tx.objectStore(WORKFLOW_STORE_NAME);
+      const req = store.get(WORKSPACE_DRAFT_ID);
+      req.onsuccess = () => resolve(cloneWorkspaceDraft(req.result as WorkspaceDraftPayload | undefined));
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    if (payload) return payload;
+  } catch {
+    // Fall back to localStorage below.
+  }
+
+  return cloneWorkspaceDraft(parseJsonStorage<WorkspaceDraftPayload | null>(WORKSPACE_DRAFT_LOCAL_KEY, null));
+};
+
+const deleteWorkspaceDraftPayload = async () => {
+  localStorage.removeItem(WORKSPACE_DRAFT_LOCAL_KEY);
+  try {
+    await deleteWorkflowPayload(WORKSPACE_DRAFT_ID);
+  } catch {
+    // Draft cleanup is best effort.
+  }
 };
 
 const loadSavedWorkflows = (): SavedWorkflow[] => {
@@ -3014,7 +3155,10 @@ const createAutoBatchImageTemplateNode = (params: {
         aspectRatio: '1:1',
         imageSize: '1K',
         promptTemplate: 'free_mode',
-        enablePromptTemplate: false
+        enablePromptTemplate: false,
+        typographyFontId: '',
+        typographyText: '',
+        enableTypefacePrompt: false
       },
       meta: {
         batchTemplate: true,
@@ -3323,9 +3467,15 @@ const prepareAiImageRequest = (
     || structuredInputs.task?.visualSpec
     || structuredInputs.default?.visualSpec
   ) as TaskVisualSpec | undefined;
-  const strictPrompt = normalizePromptText(
+  const basePrompt = normalizePromptText(
     hasPromptInput ? structuredInputs.prompt : (upstreamRawPrompt || nodeConfig.prompt)
   );
+  const typographyPrompt = buildCanvasFontPrompt(
+    nodeConfig.typographyFontId,
+    nodeConfig.typographyText,
+    nodeConfig.enableTypefacePrompt !== false
+  );
+  const strictPrompt = normalizePromptText([basePrompt, typographyPrompt].filter(Boolean).join('\n\n'));
   const connectedHandles = new Set(
     Array.isArray(structuredInputs.__connectedHandles)
       ? structuredInputs.__connectedHandles.map((item: unknown) => String(item || ''))
@@ -3370,6 +3520,762 @@ const prepareAiImageRequest = (
 
   return { requestInputs, requestConfig, strictPrompt };
 };
+
+const mergeAiImageTypographyMeta = (
+  nodeType: NodeType,
+  nodeConfig: Record<string, any>,
+  meta: any
+) => {
+  if (nodeType !== NodeType.AI_IMAGE) return meta || null;
+  const fontId = String(nodeConfig.typographyFontId || '').trim();
+  const enabled = nodeConfig.enableTypefacePrompt !== false && !!fontId;
+  if (!enabled) return meta || null;
+  const font = getCanvasFontById(fontId);
+  return {
+    ...(meta && typeof meta === 'object' ? meta : {}),
+    typefacePromptEnabled: true,
+    typographyFontId: fontId,
+    typographyFontLabel: font?.label || fontId,
+    typographyText: String(nodeConfig.typographyText || '').trim(),
+  };
+};
+
+const getImageTypographyHistoryFields = (meta: any): Partial<ImageHistoryItem> => ({
+  typographyFontId: typeof meta?.typographyFontId === 'string' ? meta.typographyFontId : undefined,
+  typographyFontLabel: typeof meta?.typographyFontLabel === 'string' ? meta.typographyFontLabel : undefined,
+  typographyText: typeof meta?.typographyText === 'string' ? meta.typographyText : undefined,
+});
+
+const clampDesignValue = (value: unknown, min: number, max: number, fallback: number) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
+};
+
+const normalizeDesignColor = (value: unknown, fallback: string) => {
+  const text = String(value || '').trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(text) || /^rgba?\(/i.test(text)) return text;
+  return fallback;
+};
+
+const loadImageNaturalSize = (src: string): Promise<{ width: number; height: number }> => new Promise((resolve) => {
+  if (typeof Image === 'undefined' || !src) {
+    resolve({ width: 1080, height: 1350 });
+    return;
+  }
+
+  const image = new Image();
+  image.onload = () => {
+    const width = image.naturalWidth || image.width || 1080;
+    const height = image.naturalHeight || image.height || 1350;
+    resolve({ width, height });
+  };
+  image.onerror = () => resolve({ width: 1080, height: 1350 });
+  image.src = src;
+});
+
+const getNearestCanvasFontId = (value: unknown, fallback?: string) => {
+  const raw = String(value || '').trim().toLowerCase();
+  const matched = CANVAS_FONTS.find((font) => (
+    font.id.toLowerCase() === raw
+    || font.label.toLowerCase() === raw
+    || font.family.toLowerCase() === raw
+    || (raw && (font.id.toLowerCase().includes(raw) || font.label.toLowerCase().includes(raw)))
+  ));
+  return matched?.id || fallback || DEFAULT_CANVAS_FONT_ID;
+};
+
+const extractJsonObjectFromText = (value: unknown): any => {
+  const text = String(value || '').trim();
+  if (!text) throw new Error('识别模型没有返回内容');
+
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [
+    fenced?.[1],
+    text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1),
+    text,
+  ].filter((item): item is string => !!item && item.trim().length > 0);
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate.trim());
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  throw new Error('识别模型返回的不是有效 JSON');
+};
+
+const buildTextLayerReconstructionPrompt = (params: {
+  typographyFontId?: string;
+  typographyText?: string;
+  sourcePromptHint?: string;
+}) => {
+  const fontHint = params.typographyFontId ? getCanvasFontById(params.typographyFontId) : null;
+  const fontList = CANVAS_FONTS.map((font) => (
+    `- ${font.id}: ${font.label}，${font.promptHint}`
+  )).join('\n');
+
+  return [
+    '你是一个电商海报文字层重建器。请观察图片，识别画面里真实可见的中文/英文文字，并把它们重建为可编辑文字层。',
+    '只分析图片里已经存在的文字，不要发挥新增文案。',
+    '只保留适合后续编辑的主要设计文案：标题、副标题、卖点、价格/权益、底部主标签。忽略很小的说明文字、图标内文字、水印、产品铭牌和难以编辑的碎片。',
+    '最多返回 8 个文字层。相邻且同一视觉组的文字请合并为一个层，用换行保留排版。',
+    '文字内容必须完整准确，不要截断最后一个字，不要把“境、力、50、%”这类尾字尾号漏掉。看不清时宁可降低 confidence，也不要自行截短。',
+    '不要返回残缺词、半个词或只剩一两个字的碎片；例如标题不能把“净速超跑”识别成“召跑”，价格不能把“领券减¥20”识别成“发 ¥20”。',
+    '请用推理能力判断 role、readingOrder 和 zIndex：readingOrder 用于编辑列表，从上到下、从左到右；zIndex 用于画面渲染，数值越大越靠上。',
+    '需要尽量识别文字的位置、字号、颜色、描边、投影、旋转、对齐、字体风格和重要程度。',
+    '坐标规则：优先返回 bbox={x,y,width,height}，x/y 是文字外接框左上角，单位可以是像素或百分比；同时返回 x/y/width 也可以，但 x/y 必须是文字层中心点相对整张图的位置。fontSize 必须按原图像素估算，不要所有层都使用同一个字号。',
+    fontHint ? `强提示：这张图生成时可能使用了字体「${fontHint.label}」（fontId=${fontHint.id}）。如果图片观感吻合，请优先使用它。` : '',
+    params.typographyText ? `强提示：图中可能包含主要文字「${params.typographyText}」。如果确实可见，请优先识别为对应文字层。` : '',
+    params.sourcePromptHint ? `弱参考：原始生图提示词可能包含预期文案，但你只能采用图片里确实可见的文字，不能凭提示词新增。提示词如下：\n${params.sourcePromptHint.slice(0, 1800)}` : '',
+    '可选字体库如下，只能从这些 fontId 中选择最接近的字体：',
+    fontList,
+    '请只返回 JSON，不要解释，不要 Markdown。格式如下：',
+    JSON.stringify({
+      layers: [{
+        text: '新品上市',
+        x: 50,
+        y: 42,
+        width: 70,
+        rotation: 0,
+        fontId: DEFAULT_CANVAS_FONT_ID,
+        fontSize: 96,
+        color: '#ffffff',
+        opacity: 1,
+        align: 'center',
+        letterSpacing: 0,
+        lineHeight: 1.05,
+        stroke: { enabled: false, color: '#000000', width: 0 },
+        shadow: { enabled: true, color: 'rgba(0,0,0,0.28)', x: 0, y: 8, blur: 18 },
+        confidence: 0.82,
+        importance: 0.9,
+        role: 'headline',
+        readingOrder: 1,
+        zIndex: 70
+      }]
+    }, null, 2),
+  ].filter(Boolean).join('\n\n');
+};
+
+const getLayerPercentValue = (
+  item: any,
+  key: 'x' | 'y' | 'width' | 'height',
+  boardSize: { width: number; height: number },
+  fallback: number
+) => {
+  const direct = Number(item?.[key]);
+  if (Number.isFinite(direct)) {
+    if (direct > 100 && (key === 'x' || key === 'width')) return (direct / boardSize.width) * 100;
+    if (direct > 100 && (key === 'y' || key === 'height')) return (direct / boardSize.height) * 100;
+    return direct;
+  }
+
+  const bbox = item?.bbox || item?.box || item?.rect || item?.boundingBox;
+  if (!bbox || typeof bbox !== 'object') return fallback;
+  const boxX = Number(bbox.x ?? bbox.left ?? bbox[0]);
+  const boxY = Number(bbox.y ?? bbox.top ?? bbox[1]);
+  const boxWidth = Number(bbox.width ?? bbox.w ?? (Number.isFinite(Number(bbox.right)) ? Number(bbox.right) - boxX : bbox[2]));
+  const boxHeight = Number(bbox.height ?? bbox.h ?? (Number.isFinite(Number(bbox.bottom)) ? Number(bbox.bottom) - boxY : bbox[3]));
+  if (!Number.isFinite(boxX) || !Number.isFinite(boxY) || !Number.isFinite(boxWidth)) return fallback;
+
+  const isPixelBox = [boxX, boxY, boxWidth, boxHeight].some((value) => Number.isFinite(value) && Math.abs(value) > 100);
+  if (key === 'width') {
+    return isPixelBox ? (boxWidth / boardSize.width) * 100 : boxWidth;
+  }
+  if (key === 'height') {
+    if (!Number.isFinite(boxHeight)) return fallback;
+    return isPixelBox ? (boxHeight / boardSize.height) * 100 : boxHeight;
+  }
+  if (key === 'x') {
+    const centerX = boxX + boxWidth / 2;
+    return isPixelBox ? (centerX / boardSize.width) * 100 : centerX;
+  }
+  const centerY = boxY + (Number.isFinite(boxHeight) ? boxHeight / 2 : 0);
+  return isPixelBox ? (centerY / boardSize.height) * 100 : centerY;
+};
+
+const countTextVisualLines = (text: string) => Math.max(1, String(text || '').split('\n').filter((line) => line.trim()).length);
+
+const getLayerFontSizeValue = (
+  item: any,
+  params: {
+    text: string;
+    boardWidth: number;
+    boardHeight: number;
+    fallback: number;
+  }
+) => {
+  const direct = Number(item?.fontSize ?? item?.font_size ?? item?.size ?? item?.textSize ?? item?.text_size);
+  const directFontSize = Number.isFinite(direct) && direct > 0 ? direct : null;
+  const boardSize = { width: params.boardWidth, height: params.boardHeight };
+  const boxHeightPercent = getLayerPercentValue(item, 'height', boardSize, NaN);
+  const boxHeightPx = Number.isFinite(boxHeightPercent)
+    ? (boxHeightPercent / 100) * params.boardHeight
+    : NaN;
+  const lineCount = countTextVisualLines(params.text);
+  const lineHeight = clampDesignValue(item?.lineHeight, 0.8, 2.4, 1.05);
+  const bboxFontSize = Number.isFinite(boxHeightPx) && boxHeightPx > 0
+    ? (boxHeightPx / lineCount / lineHeight) * 0.86
+    : null;
+
+  if (bboxFontSize !== null) {
+    if (directFontSize === null) return bboxFontSize;
+    if (directFontSize > bboxFontSize * 1.75 || directFontSize < bboxFontSize * 0.45) {
+      return bboxFontSize;
+    }
+    return directFontSize;
+  }
+
+  return directFontSize ?? params.fallback;
+};
+
+const normalizeDesignLayerRole = (value: unknown): DesignBoardTextLayer['role'] => {
+  const role = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+  if (['headline', 'title', 'main-title'].includes(role)) return 'headline';
+  if (['subtitle', 'sub-title', 'tagline'].includes(role)) return 'subtitle';
+  if (['selling-point', 'feature', 'benefit', 'bullet'].includes(role)) return 'selling-point';
+  if (['price', 'discount', 'offer'].includes(role)) return 'price';
+  if (['badge', 'label', 'seal'].includes(role)) return 'badge';
+  if (['footer', 'bottom'].includes(role)) return 'footer';
+  if (['icon-label', 'icon', 'caption'].includes(role)) return 'icon-label';
+  return 'other';
+};
+
+const getDefaultLayerZIndex = (role: DesignBoardTextLayer['role'], readingOrder: number, importance: number) => {
+  const base = ({
+    headline: 80,
+    subtitle: 72,
+    price: 92,
+    badge: 86,
+    'selling-point': 64,
+    'icon-label': 60,
+    footer: 58,
+    other: 56,
+  } as Record<string, number>)[role || 'other'] || 56;
+  const importanceBoost = Math.max(0, Math.min(8, Math.round((importance || 0) * 8)));
+  const orderNudge = Math.max(0, Math.min(4, 4 - Math.floor((readingOrder || 99) / 3)));
+  return base + importanceBoost + orderNudge;
+};
+
+const normalizeRecognizedTextCandidate = (value: unknown) => String(value || '')
+  .replace(/\r\n/g, '\n')
+  .split('\n')
+  .map((line) => line.trim())
+  .filter(Boolean)
+  .join('\n')
+  .trim();
+
+const compactRecognizedText = (value: string) => value.replace(/\s+/g, '');
+
+const getLayerTextValue = (item: any) => {
+  const lineText = Array.isArray(item?.lines)
+    ? item.lines.map((line: unknown) => String(line || '').trim()).filter(Boolean).join('\n')
+    : '';
+  const textArray = Array.isArray(item?.texts)
+    ? item.texts.map((line: unknown) => String(line || '').trim()).filter(Boolean).join('\n')
+    : '';
+  const candidates = [
+    item?.fullText,
+    item?.full_text,
+    item?.text,
+    item?.content,
+    item?.recognizedText,
+    item?.recognized_text,
+    item?.displayText,
+    item?.display_text,
+    item?.ocrText,
+    item?.value,
+    lineText,
+    textArray,
+  ]
+    .map(normalizeRecognizedTextCandidate)
+    .filter(Boolean);
+
+  return candidates.reduce((best, candidate) => (
+    compactRecognizedText(candidate).length > compactRecognizedText(best).length ? candidate : best
+  ), '');
+};
+
+const completeLayerTextFromReference = (text: string, reference?: string) => {
+  const normalizedText = normalizeRecognizedTextCandidate(text);
+  const normalizedReference = normalizeRecognizedTextCandidate(reference);
+  if (!normalizedText || !normalizedReference) return normalizedText;
+
+  const textCompact = compactRecognizedText(normalizedText);
+  if (!textCompact) return normalizedText;
+
+  const referenceSegments = [
+    normalizedReference,
+    ...normalizedReference.split(/[\n,，;；|｜\/]+/).map((segment) => segment.trim()),
+  ].filter(Boolean);
+
+  for (const segment of referenceSegments) {
+    const segmentCompact = compactRecognizedText(segment);
+    const missingLength = segmentCompact.length - textCompact.length;
+    if (
+      missingLength > 0
+      && missingLength <= 6
+      && segmentCompact.startsWith(textCompact)
+    ) {
+      return segment;
+    }
+  }
+
+  return normalizedText;
+};
+
+const getLayerReadingOrder = (item: any, fallback: number) => {
+  const value = Number(item?.readingOrder ?? item?.order ?? item?.sortOrder);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+
+const normalizeReconstructedTextLayers = (
+  raw: any,
+  params: {
+    fallbackFontId?: string;
+    fallbackText?: string;
+    boardWidth: number;
+    boardHeight: number;
+  }
+) => {
+  const rawLayers = Array.isArray(raw?.layers)
+    ? raw.layers
+    : (Array.isArray(raw) ? raw : []);
+  const fallbackFontId = params.fallbackFontId || DEFAULT_CANVAS_FONT_ID;
+
+  const boardSize = { width: params.boardWidth, height: params.boardHeight };
+  const layers = rawLayers
+    .map((item: any, index: number) => {
+      const text = completeLayerTextFromReference(getLayerTextValue(item), params.fallbackText);
+      if (!text) return null;
+      const compactText = text.replace(/\s+/g, '');
+      const importance = Number(item?.importance ?? item?.confidence ?? 0.5);
+      if (compactText.length <= 1 && importance < 0.85) return null;
+      const role = normalizeDesignLayerRole(item?.role || item?.type || item?.layerType);
+      const readingOrder = getLayerReadingOrder(item, index + 1);
+      const x = clampDesignValue(getLayerPercentValue(item, 'x', boardSize, 50), 0, 100, 50);
+      const y = clampDesignValue(getLayerPercentValue(item, 'y', boardSize, 42 + index * 9), 0, 100, 42 + index * 9);
+      const width = clampDesignValue(getLayerPercentValue(item, 'width', boardSize, 70), 16, 100, 70);
+      const fontId = getNearestCanvasFontId(item?.fontId || item?.font || item?.fontName, fallbackFontId);
+      const fontSize = getLayerFontSizeValue(item, {
+        text,
+        boardWidth: params.boardWidth,
+        boardHeight: params.boardHeight,
+        fallback: Math.max(28, Math.min(108, params.boardWidth * 0.075)),
+      });
+      const strokeWidth = clampDesignValue(item?.stroke?.width, 0, 18, item?.stroke?.enabled ? 2 : 0);
+      const shadowEnabled = item?.shadow?.enabled !== false && !!item?.shadow;
+      return createDesignBoardTextLayer({
+        name: text.length > 12 ? `文字 ${readingOrder}` : text,
+        text,
+        x,
+        y,
+        width,
+        rotation: clampDesignValue(item?.rotation, -180, 180, 0),
+        fontId,
+        fontSize: clampDesignValue(fontSize, 8, 260, Math.max(28, Math.min(108, params.boardWidth * 0.075))),
+        color: normalizeDesignColor(item?.color, '#ffffff'),
+        opacity: clampDesignValue(item?.opacity, 0, 1, 1),
+        align: ['left', 'center', 'right'].includes(item?.align) ? item.align : 'center',
+        letterSpacing: clampDesignValue(item?.letterSpacing, -12, 48, 0),
+        lineHeight: clampDesignValue(item?.lineHeight, 0.8, 2.4, 1.05),
+        role,
+        readingOrder,
+        zIndex: clampDesignValue(item?.zIndex, 0, 999, getDefaultLayerZIndex(role, readingOrder, importance)),
+        stroke: {
+          enabled: !!item?.stroke?.enabled && strokeWidth > 0,
+          color: normalizeDesignColor(item?.stroke?.color, '#000000'),
+          width: strokeWidth,
+        },
+        shadow: {
+          enabled: shadowEnabled,
+          color: normalizeDesignColor(item?.shadow?.color, 'rgba(0,0,0,0.28)'),
+          x: clampDesignValue(item?.shadow?.x, -60, 60, 0),
+          y: clampDesignValue(item?.shadow?.y, -60, 60, 8),
+          blur: clampDesignValue(item?.shadow?.blur, 0, 80, 18),
+        },
+      });
+    })
+    .filter((item): item is DesignBoardTextLayer => !!item)
+    .sort((left, right) => (
+      (left.readingOrder ?? 999) - (right.readingOrder ?? 999)
+      || (Math.round(left.y / 4) - Math.round(right.y / 4))
+      || left.x - right.x
+    ))
+    .slice(0, 10);
+
+  if (layers.length > 0) return layers;
+
+  const fallbackText = String(params.fallbackText || '').trim();
+  if (!fallbackText) return [];
+  return [
+    createDesignBoardTextLayer({
+      name: '识别文字',
+      text: fallbackText,
+      x: 50,
+      y: 42,
+      width: 72,
+      fontId: fallbackFontId,
+      fontSize: Math.max(48, Math.min(118, params.boardWidth * 0.09)),
+      color: '#ffffff',
+      role: 'headline',
+      readingOrder: 1,
+      zIndex: 80,
+      stroke: { enabled: false, color: '#000000', width: 0 },
+      shadow: { enabled: true, color: 'rgba(0,0,0,0.28)', x: 0, y: 8, blur: 18 },
+    }),
+  ];
+};
+
+const buildTextLayerLayoutReviewPrompt = (params: {
+  rawRecognition: any;
+  typographyText?: string;
+  sourcePromptHint?: string;
+}) => [
+  '你是一个严谨的电商海报文字图层整理器。请结合图片和下方初步识别 JSON，重新整理可编辑文字层。',
+  '你必须重新观察图片本身，初步识别 JSON 只是草稿；如果草稿漏掉最后一个字或层级顺序不对，以图片为准修正。',
+  '目标：修正漏字、错字、分组、阅读顺序和视觉层级。不要新增图片里不存在的文案。',
+  '特别注意：不要截断尾字尾号，例如“净无止境”不能变成“净无止”，“立省 ¥50”不能丢失 50。',
+  params.typographyText ? `如果图片中确实能看到用户指定文案，请优先保持完整：${params.typographyText}` : '',
+  '规则：',
+  '1. 只保留主要可编辑文案，最多 10 层。',
+  '2. 同一视觉组应合并成一个 layer，用换行保留原始换行。',
+  '3. readingOrder 表示编辑列表顺序，从上到下、从左到右。',
+  '4. zIndex 表示渲染层级，数值越大越靠上；价格、徽章、标题通常更高。',
+  '5. x/y/width 使用百分比；如果使用 bbox，也可返回 bbox。',
+  params.sourcePromptHint ? `弱参考：原始生图提示词可能包含预期文案，只能用于纠正图片里可见文字的错字漏字，不得新增不可见文字。\n${params.sourcePromptHint.slice(0, 1800)}` : '',
+  '只返回 JSON，不要解释，不要 Markdown。格式：',
+  JSON.stringify({
+    layers: [{
+      text: '瞬净动力\n净无止境',
+      role: 'headline',
+      readingOrder: 1,
+      zIndex: 80,
+      x: 26,
+      y: 18,
+      width: 38,
+      fontId: DEFAULT_CANVAS_FONT_ID,
+      fontSize: 105,
+      color: '#ffffff',
+      opacity: 1,
+      align: 'left',
+      letterSpacing: 0,
+      lineHeight: 1.05,
+      stroke: { enabled: false, color: '#000000', width: 0 },
+      shadow: { enabled: true, color: 'rgba(0,0,0,0.28)', x: 0, y: 8, blur: 18 },
+      confidence: 0.9,
+      importance: 0.95
+    }]
+  }, null, 2),
+  '初步识别 JSON：',
+  JSON.stringify(params.rawRecognition || {}, null, 2).slice(0, 12000),
+].filter(Boolean).join('\n\n');
+
+const buildTextLayerVisualCorrectionPrompt = (params: {
+  layers: DesignBoardTextLayer[];
+  typographyText?: string;
+  sourcePromptHint?: string;
+}) => [
+  '你是一个严格的图文分离质检器。现在会给你两张图：第 1 张是原始海报，第 2 张是当前重建预览。',
+  '任务：对比第 1 张原图和第 2 张预览，只修正文字图层 JSON，让可编辑文字尽量贴近原图的文字内容、位置、字号、对齐、层级和颜色。',
+  '当前预览里可能存在很明显的问题：漏字、错字、残缺词、文字太大、位置偏移、价格只剩部分字符。你必须修正这些问题。',
+  '硬性规则：',
+  '1. 不要返回残缺词或碎片层。标题不能把“净速超跑”变成“召跑”；价格不能把“领券减¥20”变成“发 ¥20”。',
+  '2. 必须优先保证文字内容完整准确，其次才是字体和特效相似。',
+  '3. 每个 layer 尽量返回 bbox={x,y,width,height}，x/y 是左上角，单位用原图像素；fontSize 按原图像素估算。',
+  '4. 小卖点、价格、角标要用小字号，不要套用标题字号。',
+  '5. 如果某个文字看不清，保留 confidence 低并返回最可能的完整短句，不要截断。',
+  '6. 只返回 JSON，不要解释，不要 Markdown。',
+  params.typographyText ? `如果原图能看到这些用户指定文案，请优先按完整文案校正：${params.typographyText}` : '',
+  params.sourcePromptHint ? `弱参考：原始生图提示词可能包含预期文案，只能用于纠正原图里确实可见的文字。\n${params.sourcePromptHint.slice(0, 1800)}` : '',
+  '返回格式：',
+  JSON.stringify({
+    layers: [{
+      text: '净速超跑',
+      role: 'headline',
+      readingOrder: 1,
+      zIndex: 90,
+      bbox: { x: 44, y: 36, width: 430, height: 118 },
+      fontId: DEFAULT_CANVAS_FONT_ID,
+      fontSize: 92,
+      color: '#ffffff',
+      opacity: 1,
+      align: 'left',
+      letterSpacing: 0,
+      lineHeight: 1.02,
+      stroke: { enabled: true, color: '#62d7ff', width: 2 },
+      shadow: { enabled: true, color: 'rgba(0,118,255,0.55)', x: 0, y: 4, blur: 18 },
+      confidence: 0.92,
+      importance: 1
+    }]
+  }, null, 2),
+  '当前图层 JSON：',
+  JSON.stringify({ layers: params.layers }, null, 2).slice(0, 14000),
+].filter(Boolean).join('\n\n');
+
+const buildTextRemovalPrompt = (params: {
+  textInstruction?: string;
+  layers?: DesignBoardTextLayer[];
+}) => {
+  const layerText = (params.layers || [])
+    .slice(0, 8)
+    .map((layer, index) => `${index + 1}. "${layer.text.replace(/\s+/g, ' ').trim()}" at x=${Math.round(layer.x)}%, y=${Math.round(layer.y)}%`)
+    .join('\n');
+
+  return [
+    params.textInstruction || '去除图片中的文案',
+    '请基于输入图片进行图像编辑：移除画面中所有可读文字、数字、标签、徽章、卖点文案、标题、副标题和水印式文字。',
+    '必须自然重建被文字遮挡的背景、产品边缘、材质、阴影和光线，保持原图构图、产品、镜头、色彩和空间关系不变。',
+    '不要添加任何新文字，不要保留文字残影，不要改变产品主体，不要重新设计版式。',
+    layerText ? `优先处理这些已识别文案区域：\n${layerText}` : '',
+  ].filter(Boolean).join('\n\n');
+};
+
+const clampCanvasSize = (value: unknown, fallback: number) => (
+  Math.round(clampDesignValue(value, 320, 4096, fallback))
+);
+
+const getPromptReferenceText = (value: unknown): string => {
+  if (value == null) return '';
+  if (typeof value === 'string') return normalizePromptText(value);
+  if (Array.isArray(value)) {
+    return normalizePromptText(value.map(getPromptReferenceText).filter(Boolean).join('\n\n'));
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, any>;
+    const direct = [
+      record.prompt,
+      record.text,
+      record.content,
+      record.requirement,
+      record.requirementZh,
+      record.stylePrompt,
+      record.summary,
+    ].find((item) => typeof item === 'string' && item.trim());
+    if (direct) return normalizePromptText(direct);
+    if (Array.isArray(record.layers)) {
+      return normalizePromptText(record.layers.map((layer: any) => layer?.text).filter(Boolean).join('\n'));
+    }
+    if (record.output !== undefined) return getPromptReferenceText(record.output);
+  }
+  return '';
+};
+
+const getTextRecognitionLayersFromInput = (
+  value: unknown,
+  baseBoard: DesignBoardConfig
+): DesignBoardTextLayer[] | null => {
+  if (!value) return null;
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+    try {
+      return getTextRecognitionLayersFromInput(JSON.parse(trimmed), baseBoard);
+    } catch {
+      return null;
+    }
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    const directLayers = value.every((item) => item && typeof item === 'object' && ('text' in item || 'type' in item))
+      ? value
+      : null;
+    if (directLayers) {
+      return normalizeDesignBoardConfig({ ...baseBoard, layers: directLayers }).layers;
+    }
+    for (const item of value) {
+      const layers = getTextRecognitionLayersFromInput(item, baseBoard);
+      if (layers?.length) return layers;
+    }
+    return null;
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, any>;
+    if (Array.isArray(record.layers)) {
+      return normalizeDesignBoardConfig({ ...baseBoard, layers: record.layers }).layers;
+    }
+    if (record.output !== undefined) {
+      return getTextRecognitionLayersFromInput(record.output, baseBoard);
+    }
+  }
+
+  return null;
+};
+
+const buildDesignBoardConfigForExecution = (
+  config: Partial<DesignBoardConfig> | Record<string, any> | undefined,
+  inputs: Record<string, any>
+): DesignBoardConfig => {
+  const baseBoard = normalizeDesignBoardConfig(config);
+  const upstreamLayers = getTextRecognitionLayersFromInput(
+    inputs?.textReference ?? inputs?.layers,
+    baseBoard
+  );
+  const upstreamBackground = normalizeImageSrc(
+    inputs?.cleanImage
+    ?? inputs?.backgroundImage
+    ?? inputs?.image
+    ?? inputs?.sourceImage
+    ?? inputs?.textReference
+  );
+  const layers = upstreamLayers?.length ? upstreamLayers : baseBoard.layers;
+  const selectedLayerId = layers.some((layer) => layer.id === baseBoard.selectedLayerId)
+    ? baseBoard.selectedLayerId
+    : layers[0]?.id;
+
+  return {
+    ...baseBoard,
+    ...(upstreamBackground ? { backgroundImage: upstreamBackground } : {}),
+    selectedLayerId,
+    layers,
+  };
+};
+
+const executeTextRecognitionNode = async (params: {
+  node: Node<NodeData>;
+  inputs: Record<string, any>;
+  service: AIService;
+  apiSettings: ReturnType<typeof buildApiSettings>;
+  fallbackModelId?: string;
+  signal?: AbortSignal | null;
+  onProgress?: (progress: number, label: string) => void;
+}) => {
+  const { node, inputs, service, apiSettings, fallbackModelId, signal, onProgress } = params;
+  if (!apiSettings) throw new Error('API provider is not configured');
+
+  const imageInput = inputs.image ?? inputs.sourceImage ?? inputs.default;
+  const imageSrc = getPrimaryImageUrl(imageInput);
+  if (!imageSrc) {
+    throw new Error('请先把图片连接到文字识别节点的“原图”插槽。');
+  }
+
+  const boardWidth = clampCanvasSize(node.data.config.boardWidth, 1080);
+  const boardHeight = clampCanvasSize(node.data.config.boardHeight, 1350);
+  const promptReference = getPromptReferenceText(inputs.prompt ?? inputs.default ?? node.data.config.prompt);
+  const modelId = String(node.data.config.modelId || fallbackModelId || '').trim();
+  if (!modelId) throw new Error('请先给文字识别节点选择一个视觉/对话模型。');
+
+  onProgress?.(18, '生成识别提示词');
+  const recognitionPrompt = buildTextLayerReconstructionPrompt({
+    typographyFontId: node.data.config.typographyFontId,
+    typographyText: node.data.config.typographyText,
+    sourcePromptHint: promptReference,
+  });
+
+  onProgress?.(42, '调用模型识别图片文字');
+  const apiImageInput = Array.isArray(imageInput)
+    ? imageInput.map((item) => (isStandardFilePayload(item) ? item : (getPrimaryImageUrl(item) || item)))
+    : (isStandardFilePayload(imageInput) ? imageInput : imageSrc);
+  const response = await service.executeNode(
+    node.id,
+    NodeType.AI_CHAT,
+    {
+      ...node.data.config,
+      modelId,
+      prompt: recognitionPrompt,
+      systemInstruction: '你只输出严格 JSON。不要 Markdown，不要解释，不要添加图片中不存在的文字。',
+    },
+    await resolvePayloadBeforeApi({
+      prompt: recognitionPrompt,
+      image: apiImageInput,
+    }),
+    apiSettings,
+    { signal }
+  );
+
+  const rawRecognition = String(response?.output ?? response ?? '').trim();
+  onProgress?.(76, '整理可编辑文字图层');
+  const structuredRecognition = extractJsonObjectFromText(rawRecognition);
+  const layers = normalizeReconstructedTextLayers(structuredRecognition, {
+    fallbackFontId: node.data.config.typographyFontId,
+    fallbackText: node.data.config.typographyText,
+    boardWidth,
+    boardHeight,
+  });
+
+  if (layers.length === 0) {
+    throw new Error('没有识别到可重建的主要文字层。');
+  }
+
+  const output: TextRecognitionOutput = {
+    kind: 'text-recognition',
+    version: 1,
+    boardWidth,
+    boardHeight,
+    image: imageSrc,
+    text: layers.map((layer) => layer.text).filter(Boolean).join('\n'),
+    layers,
+    rawRecognition,
+    structuredRecognition,
+    promptReference,
+    updatedAt: Date.now(),
+  };
+
+  onProgress?.(100, `已识别 ${layers.length} 个文字层`);
+  return {
+    output,
+    meta: {
+      textRecognition: true,
+      modelId: response?.meta?.modelId || modelId,
+      rawRecognition,
+      structuredRecognition,
+      recognizedLayerCount: layers.length,
+      layerCount: layers.length,
+      sourceImage: imageSrc,
+      progressLabel: `已识别 ${layers.length} 个文字层`,
+    },
+  };
+};
+
+const inferAspectRatioFromSize = (width: number, height: number) => {
+  const ratio = width / Math.max(1, height);
+  const candidates = [
+    { value: '1:1', ratio: 1 },
+    { value: '4:5', ratio: 0.8 },
+    { value: '3:4', ratio: 0.75 },
+    { value: '2:3', ratio: 2 / 3 },
+    { value: '3:2', ratio: 1.5 },
+    { value: '16:9', ratio: 16 / 9 },
+    { value: '9:16', ratio: 9 / 16 },
+    { value: '21:9', ratio: 21 / 9 },
+  ];
+  return candidates.reduce((best, item) => (
+    Math.abs(item.ratio - ratio) < Math.abs(best.ratio - ratio) ? item : best
+  ), candidates[0]).value;
+};
+
+const getVisualSourceHandle = (node?: Node<NodeData>) => {
+  if (!node) return null;
+  if (node.type === NodeType.INPUT || node.type === NodeType.IMAGE_UPLOAD || node.type === NodeType.MULTI_IMAGE_UPLOAD || node.type === NodeType.FILE_UPLOAD) {
+    return 'output';
+  }
+  if (node.type === NodeType.TASK_SELECT || node.type === NodeType.PRODUCT_IMAGE_MATCH || node.type === NodeType.DESIGN_BOARD) {
+    return 'image';
+  }
+  return null;
+};
+
+const createSoftEdge = (
+  source: string,
+  target: string,
+  sourceHandle?: string | null,
+  targetHandle?: string | null,
+  tone?: string
+): Edge => ({
+  id: `e-${source}-${target}-${targetHandle || 'default'}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  type: 'soft',
+  source,
+  target,
+  sourceHandle: sourceHandle || null,
+  targetHandle: targetHandle || null,
+  animated: false,
+  style: { strokeWidth: 1.5, ...(tone ? { stroke: tone } : {}) },
+});
 
 const executeAiImageBatch = async (
   params: {
@@ -5060,6 +5966,23 @@ const getValueFromSourceHandle = (
     return undefined;
   }
 
+  if (sourceHandle === 'text') {
+    if (typeof sourceOutput === 'string') return sourceOutput;
+    if (sourceOutput && typeof sourceOutput === 'object') {
+      const record = sourceOutput as Record<string, any>;
+      if (typeof record.text === 'string') return record.text;
+      if (Array.isArray(record.layers)) {
+        return record.layers.map((layer: any) => layer?.text).filter(Boolean).join('\n');
+      }
+    }
+    return undefined;
+  }
+
+  if (sourceHandle === 'layers') {
+    if (sourceOutput && typeof sourceOutput === 'object') return sourceOutput;
+    return undefined;
+  }
+
   if (sourceHandle === 'image') {
     if (sourceOutput && typeof sourceOutput === 'object') {
       if (isCanonicalImageResult(sourceOutput)) {
@@ -5067,6 +5990,8 @@ const getValueFromSourceHandle = (
         if (urls.length > 1) return urls;
         if (urls.length === 1) return urls[0];
       }
+      const directImage = normalizeImageSrc(sourceOutput);
+      if (directImage) return directImage;
       if (Array.isArray(sourceOutput.image)) return sourceOutput.image;
       if (Array.isArray(sourceOutput.images)) return sourceOutput.images;
       if (sourceOutput.image && typeof sourceOutput.image === 'object') return sourceOutput.image;
@@ -5151,6 +6076,7 @@ const mergeStructuredInputValue = (key: string, currentValue: any, nextValue: an
 const NODE_TO_MODEL_MODALITY: Partial<Record<NodeType, ModelModality>> = {
   [NodeType.AI_CHAT]: 'chat',
   [NodeType.PRODUCT_IMAGE_MATCH]: 'chat',
+  [NodeType.TEXT_RECOGNITION]: 'chat',
   [NodeType.AI_IMAGE]: 'image',
   [NodeType.AI_AUDIO]: 'audio',
   [NodeType.AI_VIDEO]: 'video'
@@ -5178,6 +6104,119 @@ const getActiveProviderForNodeType = (
   type?: NodeType | string | null
 ) => getActiveProviderForModality(providers, activeProviderIds, fallbackProviderId, getModalityForNodeType(type));
 
+const applyRouteSuggestionToCanvas = (
+  getState: () => CanvasState,
+  route: EnrichedClientModelHealthRoute,
+  modality: ModelModality,
+  targetNodeId?: string,
+) => {
+  const state = getState();
+  const provider = findLocalProviderForRoute(state.apiProviders, route);
+
+  if (!provider) {
+    if (!isAdminEdition) {
+      if (targetNodeId) {
+        const targetNode = getState().nodes.find((item) => item.id === targetNodeId);
+        if (targetNode) {
+          state.updateNodeData(targetNodeId, {
+            config: {
+              ...targetNode.data.config,
+              modelId: route.model_id,
+            },
+          });
+        }
+      } else {
+        state.applyModelToNodesByModality(modality, route.model_id, 'modality');
+      }
+      state.pushNotice('success', `已切换到平台线路 · ${route.model_id}`, 4200);
+      return true;
+    }
+
+    state.pushNotice('info', '本地还没有匹配这条线路的供货商，请先在 API 设置里添加相同 Base URL。', 5200, {
+      label: '打开设置',
+      onClick: () => (window as any).openApiSettings?.(),
+    });
+    return false;
+  }
+
+  const field = MODEL_FIELD_BY_MODALITY[modality];
+  const providerModels = splitProviderModels(String(provider[field] || ''));
+  if (!providerModels.includes(route.model_id)) {
+    state.updateProvider(provider.id, { [field]: [...providerModels, route.model_id].join(', ') } as Partial<APIProvider>);
+  }
+
+  state.setActiveProviderForModality(modality, provider.id);
+
+  if (targetNodeId) {
+    const targetNode = getState().nodes.find((item) => item.id === targetNodeId);
+    if (targetNode) {
+      state.updateNodeData(targetNodeId, {
+        config: {
+          ...targetNode.data.config,
+          modelId: route.model_id,
+        },
+      });
+    }
+  } else {
+    state.applyModelToNodesByModality(modality, route.model_id, 'modality');
+  }
+
+  state.pushNotice('success', `已切换到 ${getRouteDisplayName(route)} · ${route.model_id}`, 4200);
+  return true;
+};
+
+const maybeSuggestBackupRouteAfterFailure = (
+  getState: () => CanvasState,
+  node: Node<NodeData>,
+  provider?: APIProvider | null,
+) => {
+  if (!ROUTE_SUGGESTION_NODE_TYPES.has(node.type as NodeType)) return;
+  const modality = getRouteModalityForNodeType(node.type);
+  const modelId = String(node.data.config?.modelId || getState().globalActiveModels[modality] || '').trim();
+  if (!modelId || !provider) return;
+
+  const throttleKey = `${modality}:${modelId}:${provider.baseUrl || provider.name}`;
+  const lastShownAt = routeFailureNoticeTimestamps.get(throttleKey) || 0;
+  if (Date.now() - lastShownAt < ROUTE_FAILURE_NOTICE_COOLDOWN_MS) return;
+  routeFailureNoticeTimestamps.set(throttleKey, Date.now());
+
+  void fetchBestRouteSuggestion({
+    modality,
+    modelId,
+    providerName: provider.name,
+    providerBaseUrl: provider.baseUrl,
+    apiProviders: getState().apiProviders,
+    mode: 'failure',
+  })
+    .then((suggestion) => {
+      if (!suggestion) return;
+      const latestProvider = findLocalProviderForRoute(getState().apiProviders, suggestion.route);
+      const canSwitch = Boolean(latestProvider);
+      getState().pushNotice(
+        'warn',
+        `当前线路失败，建议试试 ${getRouteDisplayName(suggestion.route)}（${formatRouteSuccessRate(suggestion.route)}）。`,
+        9000,
+        {
+          label: canSwitch ? '切换线路' : '查看线路',
+          onClick: () => {
+            if (canSwitch) {
+              applyRouteSuggestionToCanvas(getState, suggestion.route, modality, node.id);
+              return;
+            }
+            (window as any).openModelHub?.();
+          },
+        },
+      );
+      getState().addLog('info', `Route suggestion: ${getRouteDisplayName(suggestion.route)} for ${modelId}.`, {
+        nodeId: node.id,
+        nodeLabel: node.data.label,
+      });
+    })
+    .catch(() => {
+      // Route health is advisory only; node errors should stay focused on execution.
+    });
+};
+
 const DEFAULT_NODE_LABELS: Partial<Record<NodeType, string>> = {
   [NodeType.INPUT]: '输入文本',
   [NodeType.FILE_UPLOAD]: '文件上传',
@@ -5185,9 +6224,11 @@ const DEFAULT_NODE_LABELS: Partial<Record<NodeType, string>> = {
   [NodeType.IMAGE_UPLOAD]: '图片上传',
   [NodeType.MULTI_IMAGE_UPLOAD]: '多图上传',
   [NodeType.AI_CHAT]: '智能对话',
+  [NodeType.TEXT_RECOGNITION]: '文字识别',
   [NodeType.AI_IMAGE]: '图像生成',
   [NodeType.AI_AUDIO]: '语音合成',
   [NodeType.AI_VIDEO]: '视频生成',
+  [NodeType.DESIGN_BOARD]: '设计画板',
   [NodeType.OUTPUT]: '结果输出',
   [NodeType.GROUP]: '视觉分组'
 };
@@ -5208,9 +6249,11 @@ const DEFAULT_NODE_DIMENSIONS: Partial<Record<NodeType, { width: number; height:
   [NodeType.STYLE_GUIDE]: { width: 460, height: 760 },
   [NodeType.PRODUCT_IMAGE_MATCH]: { width: 420, height: 700 },
   [NodeType.AI_CHAT]: { width: 340, height: 240 },
+  [NodeType.TEXT_RECOGNITION]: { width: 360, height: 420 },
   [NodeType.AI_IMAGE]: { width: 360, height: 360 },
   [NodeType.AI_AUDIO]: { width: 340, height: 220 },
   [NodeType.AI_VIDEO]: { width: 360, height: 260 },
+  [NodeType.DESIGN_BOARD]: { width: 520, height: 760 },
   [NodeType.OUTPUT]: { width: 320, height: 220 },
   [NodeType.GROUP]: { width: 600, height: 400 }
 };
@@ -5277,7 +6320,10 @@ export const useStore = create<CanvasState>((set, get) => ({
           prompt: '',
           modelId: DEFAULT_GLOBAL_ACTIVE_MODELS.image || '',
           promptTemplate: 'free_mode',
-          enablePromptTemplate: false
+          enablePromptTemplate: false,
+          typographyFontId: '',
+          typographyText: '',
+          enableTypefacePrompt: false
         }
       },
     },
@@ -5337,6 +6383,10 @@ export const useStore = create<CanvasState>((set, get) => ({
     }
   ],
   selectedNodeId: null,
+  workspaceDraftHydrated: false,
+  workspaceDraftSaving: false,
+  workspaceDraftUpdatedAt: null,
+  workspaceDraftViewport: null,
 
   apiProviders: initialApiProviders,
   activeProviderId: initialActiveProviderId,
@@ -5477,8 +6527,14 @@ export const useStore = create<CanvasState>((set, get) => ({
 
   clearLogs: () => set({ logs: [] }),
 
-  pushNotice: (level, message, durationMs = 3200) => {
-    const notice: Notice = { id: uuidv4(), level, message };
+  pushNotice: (level, message, durationMs = 3200, action) => {
+    const notice: Notice = {
+      id: uuidv4(),
+      level,
+      message,
+      actionLabel: action?.label,
+      action: action?.onClick,
+    };
     set((state) => ({ notices: [...state.notices, notice].slice(-4) }));
     setTimeout(() => {
       get().removeNotice(notice.id);
@@ -5608,8 +6664,73 @@ export const useStore = create<CanvasState>((set, get) => ({
 
   importWorkflow: (nodes: Node<NodeData>[], edges: Edge[]) => {
     const normalized = normalizeWorkflowPayload({ nodes, edges });
-    set({ nodes: normalized.nodes, edges: normalized.edges });
+    set({ nodes: normalized.nodes, edges: normalized.edges, selectedNodeId: null });
     get().addLog('success', 'Workflow imported successfully.');
+  },
+
+  hydrateWorkspaceDraft: async () => {
+    if (get().workspaceDraftHydrated) return;
+
+    try {
+      const draft = await loadWorkspaceDraftPayload();
+      if (!draft) {
+        set({ workspaceDraftHydrated: true, workspaceDraftUpdatedAt: null, workspaceDraftViewport: null });
+        return;
+      }
+
+      get().nodes.forEach((node) => revokeNodeResources(node));
+      set({
+        nodes: draft.nodes,
+        edges: draft.edges,
+        selectedNodeId: draft.selectedNodeId,
+        workspaceDraftHydrated: true,
+        workspaceDraftUpdatedAt: draft.updatedAt,
+        workspaceDraftViewport: draft.viewport || null,
+      });
+      get().addLog('success', `已恢复上次画布草稿（${new Date(draft.updatedAt).toLocaleString()}）。`);
+    } catch (err) {
+      console.error('Failed to hydrate workspace draft:', err);
+      set({ workspaceDraftHydrated: true, workspaceDraftUpdatedAt: null, workspaceDraftViewport: null });
+      get().addLog('warn', '自动草稿读取失败，已使用默认画布。');
+    }
+  },
+
+  persistWorkspaceDraft: async (options) => {
+    if (!get().workspaceDraftHydrated) return;
+
+    const state = get();
+    const updatedAt = Date.now();
+    const draft = cloneWorkspaceDraft({
+      version: WORKSPACE_DRAFT_VERSION,
+      updatedAt,
+      selectedNodeId: state.selectedNodeId,
+      viewport: options?.viewport || state.workspaceDraftViewport || null,
+      nodes: state.nodes,
+      edges: state.edges,
+    });
+    if (!draft) return;
+
+    set({ workspaceDraftSaving: true });
+    try {
+      await saveWorkspaceDraftPayload(draft);
+      set({
+        workspaceDraftSaving: false,
+        workspaceDraftUpdatedAt: updatedAt,
+        workspaceDraftViewport: draft.viewport || null,
+      });
+    } catch (err) {
+      console.error('Failed to persist workspace draft:', err);
+      set({ workspaceDraftSaving: false });
+      get().addLog('error', '自动草稿保存失败，刷新后可能无法恢复当前画布。');
+    }
+  },
+
+  clearWorkspaceDraft: async () => {
+    try {
+      await deleteWorkspaceDraftPayload();
+    } finally {
+      set({ workspaceDraftUpdatedAt: null, workspaceDraftViewport: null, workspaceDraftSaving: false });
+    }
   },
 
   saveWorkflow: (name: string) => {
@@ -5771,7 +6892,7 @@ export const useStore = create<CanvasState>((set, get) => ({
 
   clearCanvas: () => {
     get().nodes.forEach(node => revokeNodeResources(node));
-    set({ nodes: [], edges: [], selectedNodeId: null });
+    set({ nodes: [], edges: [], selectedNodeId: null, workspaceDraftViewport: null });
     get().addLog('info', 'Canvas cleared.');
   },
 
@@ -5788,7 +6909,13 @@ export const useStore = create<CanvasState>((set, get) => ({
       : { ...defaultDimensions };
 
     const videoDefaults = type === NodeType.AI_VIDEO ? { aspectRatio: '16:9' } : {};
-    const imageDefaults = type === NodeType.AI_IMAGE ? { promptTemplate: 'free_mode', enablePromptTemplate: false } : {};
+    const imageDefaults = type === NodeType.AI_IMAGE ? {
+      promptTemplate: 'free_mode',
+      enablePromptTemplate: false,
+      typographyFontId: '',
+      typographyText: '',
+      enableTypefacePrompt: false
+    } : {};
     const tableDefaults = type === NodeType.TABLE_PARSE
       ? { ...DEFAULT_TABLE_PARSE_CONFIG, smartModelId: get().globalActiveModels.chat || '' }
       : {};
@@ -5796,6 +6923,8 @@ export const useStore = create<CanvasState>((set, get) => ({
     const batchDefaults = type === NodeType.BATCH_EXECUTE ? { ...DEFAULT_BATCH_EXECUTE_CONFIG } : {};
     const styleGuideDefaults = type === NodeType.STYLE_GUIDE ? { ...DEFAULT_STYLE_GUIDE_CONFIG } : {};
     const productImageMatchDefaults = type === NodeType.PRODUCT_IMAGE_MATCH ? { ...DEFAULT_PRODUCT_IMAGE_MATCH_CONFIG } : {};
+    const textRecognitionDefaults = type === NodeType.TEXT_RECOGNITION ? { boardWidth: 1080, boardHeight: 1350 } : {};
+    const designBoardDefaults = type === NodeType.DESIGN_BOARD ? createDefaultDesignBoardConfig() : {};
 
     const newNode: Node<NodeData> = {
       id,
@@ -5819,6 +6948,8 @@ export const useStore = create<CanvasState>((set, get) => ({
           ...batchDefaults,
           ...styleGuideDefaults,
           ...productImageMatchDefaults,
+          ...textRecognitionDefaults,
+          ...designBoardDefaults,
         },
       },
     };
@@ -5850,6 +6981,659 @@ export const useStore = create<CanvasState>((set, get) => ({
     set({ nodes: [...get().nodes, newNode], edges: nextEdges, selectedNodeId: id });
     get().addLog('info', `Node added: ${newNode.data.label}`);
     return id;
+  },
+
+  reconstructImageTextToDesignBoard: async (params) => {
+    const rawImageSrc = String(params.imageSrc || '').trim();
+    const imageSrc = normalizeImageSrc(rawImageSrc) || rawImageSrc;
+    if (!imageSrc) {
+      get().pushNotice('warn', '没有可转换的图片。');
+      return null;
+    }
+
+    const sourceNode = params.sourceNodeId
+      ? get().nodes.find((node) => node.id === params.sourceNodeId)
+      : undefined;
+    const chatProvider = getActiveProviderForNodeType(
+      get().apiProviders,
+      get().activeProviderIds,
+      get().activeProviderId,
+      NodeType.AI_CHAT
+    );
+    const imageProvider = getActiveProviderForNodeType(
+      get().apiProviders,
+      get().activeProviderIds,
+      get().activeProviderId,
+      NodeType.AI_IMAGE
+    );
+    const chatApiSettings = buildApiSettings(chatProvider);
+    const imageApiSettings = buildApiSettings(imageProvider);
+    const recognitionModelId = get().globalActiveModels.chat || get().getModelsForNode(NodeType.AI_CHAT)[0] || '';
+    const cleanupImageModelId = get().globalActiveModels.image || get().getModelsForNode(NodeType.AI_IMAGE)[0] || '';
+
+    if (!chatProvider || !chatApiSettings || !recognitionModelId) {
+      get().pushNotice('error', isAdminEdition
+        ? '请先配置可用的视觉/对话模型。'
+        : '当前没有可用的平台视觉线路，请联系管理员配置。');
+      return null;
+    }
+
+    if (!imageProvider || !imageApiSettings || !cleanupImageModelId) {
+      get().pushNotice('error', isAdminEdition
+        ? '请先配置可用的图像编辑模型。'
+        : '当前没有可用的平台图像线路，请联系管理员配置。');
+      return null;
+    }
+
+    const sourceLabel = params.sourceLabel || sourceNode?.data.label || '图片';
+    const sourceType = sourceNode?.data.type as NodeType | undefined;
+    const sourcePromptHint = normalizePromptText([
+      params.typographyText,
+      sourceNode?.data.meta?.typographyText,
+      sourceNode?.data.config?.typographyText,
+      sourceNode?.data.inputs?.prompt,
+      sourceNode?.data.config?.prompt,
+    ].filter((item): item is string => typeof item === 'string' && item.trim().length > 0).join('\n\n'));
+    const sourceWidth = Number((sourceNode?.style as any)?.width || (sourceType ? DEFAULT_NODE_DIMENSIONS[sourceType]?.width : 360) || 360);
+    const baseX = sourceNode ? sourceNode.position.x + sourceWidth + 170 : 420;
+    const baseY = sourceNode ? sourceNode.position.y : 160;
+    const removalInstruction = '去除图片中的文案';
+    const service = new AIService();
+
+    const recognitionNodeId = get().addNode(NodeType.TEXT_RECOGNITION, { x: baseX, y: baseY - 320 });
+    get().updateNodeData(recognitionNodeId, {
+      label: '文字识别整理',
+      status: 'running',
+      progress: 3,
+      config: {
+        prompt: '识别图片里的主要文字，并整理为可编辑文字层。',
+        modelId: recognitionModelId,
+        systemInstruction: '你只输出严格 JSON。不要 Markdown，不要解释，不要添加图片中不存在的文字。',
+        boardWidth: 1080,
+        boardHeight: 1350,
+      },
+      inputs: { image: imageSrc },
+      meta: {
+        textReconstructionFlow: true,
+        role: 'text-layer-reasoning',
+        sourceNodeId: params.sourceNodeId,
+        progressLabel: '等待图片准备',
+      },
+    });
+
+    const cleanupPromptNodeId = get().addNode(NodeType.INPUT, { x: baseX, y: baseY - 40 });
+    get().updateNodeData(cleanupPromptNodeId, {
+      label: '去文案指令',
+      status: 'success',
+      config: { prompt: removalInstruction, modelId: '' },
+      output: removalInstruction,
+      meta: { textReconstructionFlow: true, role: 'remove-text-prompt' },
+    });
+
+    const cleanupNodeId = get().addNode(NodeType.AI_IMAGE, { x: baseX, y: baseY + 220 });
+    get().updateNodeData(cleanupNodeId, {
+      label: '去除文案',
+      status: 'running',
+      progress: 5,
+      config: {
+        prompt: removalInstruction,
+        modelId: cleanupImageModelId,
+        promptTemplate: 'free_mode',
+        enablePromptTemplate: false,
+        useEditMode: true,
+        referenceType: 'product',
+        aspectRatio: sourceNode?.data.config?.aspectRatio || '1:1',
+        imageSize: sourceNode?.data.config?.imageSize || '1K',
+      },
+      inputs: { prompt: removalInstruction, image: imageSrc },
+      meta: {
+        textReconstructionFlow: true,
+        role: 'clean-background',
+        sourceNodeId: params.sourceNodeId,
+        progressLabel: '等待文字解析',
+      },
+    });
+
+    const placeholderLayer = createDesignBoardTextLayer({
+      name: '转换进度',
+      text: '正在转换可编辑文字...',
+      x: 50,
+      y: 50,
+      width: 70,
+      fontSize: 46,
+      color: '#6d5dfc',
+      shadow: { enabled: false, color: 'rgba(0,0,0,0.2)', x: 0, y: 4, blur: 12 },
+    });
+    const initialBoardConfig = {
+      boardWidth: 1080,
+      boardHeight: 1350,
+      backgroundColor: '#ffffff',
+      selectedLayerId: placeholderLayer.id,
+      layers: [placeholderLayer],
+    };
+    const boardNodeId = get().addNode(NodeType.DESIGN_BOARD, { x: baseX + 560, y: baseY - 40 });
+    get().updateNodeData(boardNodeId, {
+      label: '可编辑文字画板',
+      status: 'running',
+      progress: 3,
+      config: initialBoardConfig,
+      inputs: { sourceImage: imageSrc },
+      output: buildDesignBoardOutput(initialBoardConfig, { sourceImage: imageSrc }),
+      meta: {
+        reconstructedText: true,
+        sourceNodeId: params.sourceNodeId,
+        sourceLabel,
+        recognitionNodeId,
+        cleanupNodeId,
+        cleanupPromptNodeId,
+        recognitionModelId,
+        cleanupImageModelId,
+        progressLabel: '准备转换流程',
+      },
+    });
+
+    const edgesToAdd: Edge[] = [
+      createSoftEdge(cleanupPromptNodeId, cleanupNodeId, 'output', 'prompt', '#60a5fa'),
+      createSoftEdge(recognitionNodeId, boardNodeId, 'layers', 'textReference', '#60a5fa'),
+      createSoftEdge(cleanupNodeId, boardNodeId, null, 'cleanImage', '#8b5cf6'),
+    ];
+    if (sourceNode) {
+      const sourceHandle = getVisualSourceHandle(sourceNode);
+      edgesToAdd.push(
+        createSoftEdge(sourceNode.id, recognitionNodeId, sourceHandle, 'image', '#f97316'),
+        createSoftEdge(sourceNode.id, cleanupNodeId, sourceHandle, 'image', '#f97316'),
+        createSoftEdge(sourceNode.id, boardNodeId, sourceHandle, 'sourceImage', '#f97316')
+      );
+
+      const promptEdge = get().edges.find((edge) => (
+        edge.target === sourceNode.id
+        && (!edge.targetHandle || edge.targetHandle === 'prompt')
+      ));
+      if (promptEdge?.source) {
+        edgesToAdd.push(createSoftEdge(promptEdge.source, recognitionNodeId, promptEdge.sourceHandle || null, 'prompt', '#60a5fa'));
+        edgesToAdd.push(createSoftEdge(promptEdge.source, boardNodeId, promptEdge.sourceHandle || null, 'textReference', '#60a5fa'));
+      }
+    }
+    set({ edges: [...get().edges, ...edgesToAdd] });
+
+    const setBoardStage = (progress: number, label: string, extra?: Partial<NodeData>) => {
+      const currentBoard = get().nodes.find((node) => node.id === boardNodeId);
+      get().updateNodeData(boardNodeId, {
+        status: 'running',
+        progress,
+        meta: {
+          ...(currentBoard?.data.meta && typeof currentBoard.data.meta === 'object' ? currentBoard.data.meta : {}),
+          progressLabel: label,
+        },
+        ...extra,
+      });
+    };
+
+    get().pushNotice('info', '已创建去文案流程，正在转换为可编辑文字画板...');
+    get().addLog('info', `开始把 [${sourceLabel}] 转为可编辑文字画板。`, {
+      nodeId: boardNodeId,
+      nodeLabel: '可编辑文字画板'
+    });
+
+    try {
+      setBoardStage(8, '准备图片');
+      const usableImageSrc = imageSrc.startsWith('data:')
+        ? imageSrc
+        : ((await toDataUrl(imageSrc)) || imageSrc);
+      const imageSize = await loadImageNaturalSize(usableImageSrc);
+      const boardWidth = Math.round(clampDesignValue(imageSize.width, 320, 4096, 1080));
+      const boardHeight = Math.round(clampDesignValue(imageSize.height, 320, 4096, 1350));
+      const aspectRatio = sourceNode?.data.config?.aspectRatio || inferAspectRatioFromSize(boardWidth, boardHeight);
+
+      get().updateNodeData(cleanupNodeId, {
+        status: 'running',
+        progress: 12,
+        config: {
+          aspectRatio,
+          imageSize: sourceNode?.data.config?.imageSize || '1K',
+        },
+        inputs: { prompt: removalInstruction, image: usableImageSrc },
+      });
+      setBoardStage(15, '识别主要文字层', {
+        config: {
+          ...initialBoardConfig,
+          boardWidth,
+          boardHeight,
+        },
+        inputs: { sourceImage: usableImageSrc },
+      });
+
+      const recognitionPrompt = buildTextLayerReconstructionPrompt({
+        typographyFontId: params.typographyFontId,
+        typographyText: params.typographyText,
+        sourcePromptHint,
+      });
+      get().updateNodeData(recognitionNodeId, {
+        status: 'running',
+        progress: 18,
+        config: {
+          prompt: recognitionPrompt,
+          modelId: recognitionModelId,
+          systemInstruction: '你只输出严格 JSON。不要 Markdown，不要解释，不要添加图片中不存在的文字。',
+          boardWidth,
+          boardHeight,
+        },
+        inputs: { prompt: recognitionPrompt, image: usableImageSrc },
+        meta: {
+          textReconstructionFlow: true,
+          role: 'text-layer-reasoning',
+          sourceNodeId: params.sourceNodeId,
+          modelId: recognitionModelId,
+          progressLabel: '识别图片文字层',
+        },
+      });
+      const recognitionResponse = await service.executeNode(
+        recognitionNodeId,
+        NodeType.AI_CHAT,
+        {
+          modelId: recognitionModelId,
+          prompt: recognitionPrompt,
+          systemInstruction: '你只输出严格 JSON。不要 Markdown，不要解释，不要添加图片中不存在的文字。',
+        },
+        await resolvePayloadBeforeApi({
+          prompt: recognitionPrompt,
+          image: usableImageSrc,
+        }),
+        chatApiSettings
+      );
+
+      const parsed = extractJsonObjectFromText(recognitionResponse?.output ?? recognitionResponse);
+      let structuredRecognition = parsed;
+      setBoardStage(28, '推理整理图层顺序');
+      get().updateNodeData(recognitionNodeId, {
+        status: 'running',
+        progress: 56,
+        output: JSON.stringify(parsed, null, 2),
+        meta: {
+          textReconstructionFlow: true,
+          role: 'text-layer-reasoning',
+          sourceNodeId: params.sourceNodeId,
+          modelId: recognitionModelId,
+          rawRecognition: parsed,
+          progressLabel: '推理整理图层顺序',
+        },
+      });
+      try {
+        const reviewPrompt = buildTextLayerLayoutReviewPrompt({
+          rawRecognition: parsed,
+          typographyText: params.typographyText,
+          sourcePromptHint,
+        });
+        get().updateNodeData(recognitionNodeId, {
+          config: {
+            prompt: reviewPrompt,
+            modelId: recognitionModelId,
+            systemInstruction: '你只输出严格 JSON。请修正 OCR 漏字、合并同组文案，并输出 readingOrder 与 zIndex。',
+          },
+          inputs: { prompt: reviewPrompt, image: usableImageSrc },
+        });
+        const reviewResponse = await service.executeNode(
+          recognitionNodeId,
+          NodeType.AI_CHAT,
+          {
+            modelId: recognitionModelId,
+            prompt: reviewPrompt,
+            systemInstruction: '你只输出严格 JSON。请修正 OCR 漏字、合并同组文案，并输出 readingOrder 与 zIndex。',
+          },
+          await resolvePayloadBeforeApi({
+            prompt: reviewPrompt,
+            image: usableImageSrc,
+          }),
+          chatApiSettings
+        );
+        structuredRecognition = extractJsonObjectFromText(reviewResponse?.output ?? reviewResponse);
+        get().updateNodeData(recognitionNodeId, {
+          status: 'running',
+          progress: 72,
+          output: JSON.stringify(structuredRecognition, null, 2),
+          meta: {
+            textReconstructionFlow: true,
+            role: 'text-layer-reasoning',
+            sourceNodeId: params.sourceNodeId,
+            modelId: recognitionModelId,
+            rawRecognition: parsed,
+            structuredRecognition,
+            progressLabel: '整理完成，等待生成图层',
+          },
+        });
+      } catch (reviewError: any) {
+        get().addLog('warn', `图层推理整理失败，已使用初步识别结果：${reviewError?.message || reviewError}`, {
+          nodeId: boardNodeId,
+          nodeLabel: '可编辑文字画板'
+        });
+      }
+
+      const layers = normalizeReconstructedTextLayers(structuredRecognition, {
+        fallbackFontId: params.typographyFontId,
+        fallbackText: params.typographyText,
+        boardWidth,
+        boardHeight,
+      });
+
+      if (layers.length === 0) {
+        throw new Error('没有识别到可重建的主要文字层。');
+      }
+
+      get().updateNodeData(recognitionNodeId, {
+        status: 'success',
+        progress: 100,
+        output: {
+          kind: 'text-recognition',
+          version: 1,
+          boardWidth,
+          boardHeight,
+          image: usableImageSrc,
+          text: layers.map((layer) => layer.text).filter(Boolean).join('\n'),
+          layers,
+          rawRecognition: JSON.stringify(parsed, null, 2),
+          structuredRecognition,
+          promptReference: sourcePromptHint,
+          updatedAt: Date.now(),
+        } as TextRecognitionOutput,
+        meta: {
+          textReconstructionFlow: true,
+          role: 'text-layer-reasoning',
+          sourceNodeId: params.sourceNodeId,
+          modelId: recognitionModelId,
+          rawRecognition: parsed,
+          structuredRecognition,
+          recognizedLayerCount: layers.length,
+          progressLabel: `已整理 ${layers.length} 个文字层`,
+        },
+        error: undefined,
+      });
+      setBoardStage(35, `已识别 ${layers.length} 个文字层`);
+      const cleanupPrompt = buildTextRemovalPrompt({
+        textInstruction: removalInstruction,
+        layers,
+      });
+
+      get().updateNodeData(cleanupPromptNodeId, {
+        status: 'success',
+        config: { prompt: cleanupPrompt, modelId: '' },
+        output: cleanupPrompt,
+      });
+      get().updateNodeData(cleanupNodeId, {
+        status: 'running',
+        progress: 42,
+        config: {
+          prompt: cleanupPrompt,
+          modelId: cleanupImageModelId,
+          promptTemplate: 'free_mode',
+          enablePromptTemplate: false,
+          useEditMode: true,
+          referenceType: 'product',
+          aspectRatio,
+          imageSize: sourceNode?.data.config?.imageSize || '1K',
+        },
+        inputs: { prompt: cleanupPrompt, image: usableImageSrc },
+        error: undefined,
+      });
+      startImageNodeProgress(cleanupNodeId, get().updateNodeData);
+      setBoardStage(45, '正在调用图像模型去除原文案');
+
+      const cleanupResponse = await service.executeNode(
+        cleanupNodeId,
+        NodeType.AI_IMAGE,
+        {
+          modelId: cleanupImageModelId,
+          prompt: cleanupPrompt,
+          promptTemplate: 'free_mode',
+          enablePromptTemplate: false,
+          useEditMode: true,
+          referenceType: 'product',
+          aspectRatio,
+          imageSize: sourceNode?.data.config?.imageSize || '1K',
+        },
+        await resolvePayloadBeforeApi({
+          prompt: cleanupPrompt,
+          image: {
+            type: 'image',
+            data: usableImageSrc,
+            useEditMode: true,
+            referenceType: 'product',
+            guidancePrompt: 'Use this as the exact source image. Remove text only and preserve the product, background, lighting and composition.',
+          },
+        }),
+        imageApiSettings
+      );
+
+      const cleanupRawOutput = cleanupResponse?.output ?? cleanupResponse;
+      const cleanupOutput = normalizeGenerationOutput(cleanupRawOutput);
+      const cleanBackgroundImage = getPrimaryImageUrl(cleanupOutput);
+      if (!cleanBackgroundImage) {
+        throw new Error('图像模型没有返回可用的无字背景图。');
+      }
+
+      stopNodeProgress(cleanupNodeId);
+      get().updateNodeData(cleanupNodeId, {
+        status: 'success',
+        progress: 100,
+        output: cleanupOutput,
+        inputs: { prompt: cleanupPrompt, image: usableImageSrc },
+        meta: {
+          textReconstructionFlow: true,
+          role: 'clean-background',
+          sourceNodeId: params.sourceNodeId,
+          modelId: cleanupImageModelId,
+          sourceImage: usableImageSrc,
+          cleanBackgroundImage,
+          prompt: cleanupPrompt,
+        },
+        error: undefined,
+      });
+
+      setBoardStage(82, '已生成无字背景');
+      let finalLayers = layers;
+      let visualCorrectionRaw: any = null;
+      try {
+        setBoardStage(88, '视觉复核文字效果');
+        const draftBoardConfig = {
+          boardWidth,
+          boardHeight,
+          backgroundColor: '#ffffff',
+          backgroundImage: cleanBackgroundImage,
+          selectedLayerId: layers[0].id,
+          layers,
+        };
+        const draftInputs = {
+          sourceImage: usableImageSrc,
+          cleanImage: cleanBackgroundImage,
+          textReference: params.typographyText || '',
+        };
+        const draftRenderedImage = await renderDesignBoardToDataUrl(draftBoardConfig, draftInputs);
+        const correctionPrompt = buildTextLayerVisualCorrectionPrompt({
+          layers,
+          typographyText: params.typographyText,
+          sourcePromptHint,
+        });
+        get().updateNodeData(recognitionNodeId, {
+          status: 'running',
+          progress: 88,
+          config: {
+            prompt: correctionPrompt,
+            modelId: recognitionModelId,
+            systemInstruction: '你只输出严格 JSON。请对比原图和重建预览，修正漏字、错字、位置、字号和层级。',
+          },
+          inputs: { prompt: correctionPrompt, image: [usableImageSrc, draftRenderedImage] },
+          meta: {
+            textReconstructionFlow: true,
+            role: 'text-layer-reasoning',
+            sourceNodeId: params.sourceNodeId,
+            modelId: recognitionModelId,
+            rawRecognition: parsed,
+            structuredRecognition,
+            draftRenderedImage,
+            progressLabel: '视觉复核文字效果',
+          },
+        });
+        const correctionResponse = await service.executeNode(
+          recognitionNodeId,
+          NodeType.AI_CHAT,
+          {
+            modelId: recognitionModelId,
+            prompt: correctionPrompt,
+            systemInstruction: '你只输出严格 JSON。请对比原图和重建预览，修正漏字、错字、位置、字号和层级。',
+          },
+          await resolvePayloadBeforeApi({
+            prompt: correctionPrompt,
+            image: [usableImageSrc, draftRenderedImage],
+          }),
+          chatApiSettings
+        );
+        visualCorrectionRaw = extractJsonObjectFromText(correctionResponse?.output ?? correctionResponse);
+        const correctedLayers = normalizeReconstructedTextLayers(visualCorrectionRaw, {
+          fallbackFontId: params.typographyFontId,
+          fallbackText: params.typographyText,
+          boardWidth,
+          boardHeight,
+        });
+        if (correctedLayers.length > 0) {
+          finalLayers = correctedLayers;
+        }
+      } catch (correctionError: any) {
+        get().addLog('warn', `视觉复核文字效果失败，已使用上一版文字层：${correctionError?.message || correctionError}`, {
+          nodeId: boardNodeId,
+          nodeLabel: '可编辑文字画板'
+        });
+      }
+      get().updateNodeData(recognitionNodeId, {
+        status: 'success',
+        progress: 100,
+        output: {
+          kind: 'text-recognition',
+          version: 1,
+          boardWidth,
+          boardHeight,
+          image: usableImageSrc,
+          text: finalLayers.map((layer) => layer.text).filter(Boolean).join('\n'),
+          layers: finalLayers,
+          rawRecognition: JSON.stringify(parsed, null, 2),
+          structuredRecognition,
+          promptReference: sourcePromptHint,
+          updatedAt: Date.now(),
+        } as TextRecognitionOutput,
+        meta: {
+          textReconstructionFlow: true,
+          role: 'text-layer-reasoning',
+          sourceNodeId: params.sourceNodeId,
+          modelId: recognitionModelId,
+          rawRecognition: parsed,
+          structuredRecognition,
+          visualCorrection: visualCorrectionRaw,
+          recognizedLayerCount: finalLayers.length,
+          progressLabel: `已复核 ${finalLayers.length} 个文字层`,
+        },
+        error: undefined,
+      });
+
+      const boardConfig = {
+        boardWidth,
+        boardHeight,
+        backgroundColor: '#ffffff',
+        backgroundImage: cleanBackgroundImage,
+        selectedLayerId: finalLayers[0]?.id,
+        layers: finalLayers,
+      };
+      const boardInputs = {
+        sourceImage: usableImageSrc,
+        cleanImage: cleanBackgroundImage,
+        textReference: params.typographyText || '',
+      };
+      let renderedImage: string | undefined;
+      let renderError: string | undefined;
+      try {
+        renderedImage = await renderDesignBoardToDataUrl(boardConfig, boardInputs);
+      } catch (error: any) {
+        renderError = error?.message || 'Design board render failed';
+      }
+
+      get().updateNodeData(boardNodeId, {
+        status: 'success',
+        progress: 100,
+        config: boardConfig,
+        inputs: boardInputs,
+        output: buildDesignBoardOutput(boardConfig, boardInputs, renderedImage, renderError),
+        meta: {
+          reconstructedText: true,
+          sourceNodeId: params.sourceNodeId,
+          sourceLabel,
+          recognitionNodeId,
+          cleanupNodeId,
+          cleanupPromptNodeId,
+          originalImageSrc: usableImageSrc,
+          cleanBackgroundImage,
+          recognitionModelId,
+          cleanupImageModelId,
+          recognizedLayerCount: finalLayers.length,
+          rawRecognition: parsed,
+          structuredRecognition,
+          visualCorrection: visualCorrectionRaw,
+          renderedImage: !!renderedImage,
+          renderError,
+          progressLabel: '转换完成',
+        },
+        error: renderError,
+      });
+
+      set({ selectedNodeId: boardNodeId });
+      get().pushNotice('success', `已生成可编辑文字画板：${finalLayers.length} 个文字层`);
+      get().addLog('success', `已从 [${sourceLabel}] 生成无字背景并重建 ${finalLayers.length} 个文字层。`, {
+        nodeId: boardNodeId,
+        nodeLabel: '可编辑文字画板'
+      });
+      return boardNodeId;
+    } catch (error: any) {
+      stopNodeProgress(cleanupNodeId);
+      const message = normalizeUiErrorMessage(error?.message || error || '转可编辑文字失败');
+      const recognitionNode = get().nodes.find((node) => node.id === recognitionNodeId);
+      if (recognitionNode?.data.status !== 'success') {
+        get().updateNodeData(recognitionNodeId, {
+          status: 'error',
+          error: message,
+          progress: undefined,
+          meta: {
+            textReconstructionFlow: true,
+            role: 'text-layer-reasoning',
+            sourceNodeId: params.sourceNodeId,
+            modelId: recognitionModelId,
+            progressLabel: '识别整理失败',
+          },
+        });
+      }
+      get().updateNodeData(cleanupNodeId, {
+        status: 'error',
+        error: message,
+        progress: undefined,
+      });
+      get().updateNodeData(boardNodeId, {
+        status: 'error',
+        error: message,
+        progress: undefined,
+        meta: {
+          reconstructedText: true,
+          sourceNodeId: params.sourceNodeId,
+          sourceLabel,
+          recognitionNodeId,
+          cleanupNodeId,
+          cleanupPromptNodeId,
+          recognitionModelId,
+          cleanupImageModelId,
+          progressLabel: '转换失败',
+        },
+      });
+      get().pushNotice('error', message);
+      get().addLog('error', `转可编辑文字失败：${message}`, {
+        nodeId: boardNodeId,
+        nodeLabel: '可编辑文字画板'
+      });
+      return null;
+    }
   },
 
   duplicateSelectionInCanvas: (count = 1, options) => {
@@ -6359,6 +8143,35 @@ export const useStore = create<CanvasState>((set, get) => ({
           return { id: node.id, output, inputs: structuredInputs };
         }
 
+        if (node.type === NodeType.DESIGN_BOARD) {
+          const boardConfig = buildDesignBoardConfigForExecution(node.data.config, structuredInputs);
+          get().updateNodeData(node.id, { config: boardConfig });
+          let renderedImage: string | undefined;
+          let renderError: string | undefined;
+          try {
+            renderedImage = await renderDesignBoardToDataUrl(boardConfig, structuredInputs);
+          } catch (error: any) {
+            renderError = error?.message || 'Design board render failed';
+            get().addLog('warn', `[${node.data.label}] 设计图导出失败：${renderError}`, {
+              nodeId: node.id,
+              nodeLabel: node.data.label
+            });
+          }
+          const output = buildDesignBoardOutput(boardConfig, structuredInputs, renderedImage, renderError);
+          return {
+            id: node.id,
+            output,
+            inputs: structuredInputs,
+            meta: {
+              layerCount: output.layers.length,
+              boardWidth: output.boardWidth,
+              boardHeight: output.boardHeight,
+              renderedImage: !!renderedImage,
+              renderError
+            }
+          };
+        }
+
         if (node.type === NodeType.TABLE_PARSE) {
           const sourceFile = structuredInputs.file ?? structuredInputs.default;
           if (!sourceFile) throw new Error('璇峰厛杩炴帴骞朵笂浼?Excel 琛ㄦ牸');
@@ -6483,6 +8296,44 @@ export const useStore = create<CanvasState>((set, get) => ({
           return { id: node.id, output, inputs: structuredInputs };
         }
 
+        if (node.type === NodeType.TEXT_RECOGNITION) {
+          const provider = getActiveProviderForModality(apiProviders, activeProviderIds, activeProviderId, 'chat');
+          if (!provider) {
+            throw new Error(isAdminEdition ? 'API provider is not configured' : '当前没有可用的平台视觉线路，请联系管理员配置。');
+          }
+
+          get().addLog('api', isAdminEdition
+            ? `API request: [${node.data.config.modelId || get().globalActiveModels.chat || ''}] -> ${provider.baseUrl}/chat/completions`
+            : `平台线路请求: [${node.data.config.modelId || get().globalActiveModels.chat || ''}]`, {
+            nodeId: node.id,
+            nodeLabel: node.data.label,
+          });
+
+          const nodeAbortController = new AbortController();
+          activeNodeAbortControllers.set(node.id, nodeAbortController);
+          try {
+            const { output, meta } = await executeTextRecognitionNode({
+              node,
+              inputs: structuredInputs,
+              service,
+              apiSettings: buildApiSettings(provider),
+              fallbackModelId: get().globalActiveModels.chat || get().getModelsForNode(NodeType.TEXT_RECOGNITION)[0] || '',
+              signal: nodeAbortController.signal,
+              onProgress: (progress) => get().updateNodeData(node.id, { progress }),
+            });
+            return {
+              id: node.id,
+              output,
+              inputs: structuredInputs,
+              meta,
+              providerName: isAdminEdition ? provider.name : '平台线路',
+              providerBaseUrl: isAdminEdition ? provider.baseUrl : ''
+            };
+          } finally {
+            activeNodeAbortControllers.delete(node.id);
+          }
+        }
+
         if (node.type === NodeType.PRODUCT_IMAGE_MATCH) {
           const provider = getActiveProviderForModality(apiProviders, activeProviderIds, activeProviderId, 'chat');
           const { output, meta } = await executeProductImageMatch({
@@ -6500,16 +8351,20 @@ export const useStore = create<CanvasState>((set, get) => ({
             output,
             inputs: structuredInputs,
             meta,
-            providerName: provider?.name,
-            providerBaseUrl: provider?.baseUrl
+            providerName: isAdminEdition ? provider?.name : '平台线路',
+            providerBaseUrl: isAdminEdition ? provider?.baseUrl : ''
           };
         }
 
         const provider = getActiveProviderForNodeType(apiProviders, activeProviderIds, activeProviderId, node.type);
-        if (!provider) throw new Error('API provider is not configured');
+        if (!provider) {
+          throw new Error(isAdminEdition ? 'API provider is not configured' : '当前没有可用的平台线路，请先在模型枢纽选择可用模型。');
+        }
 
         if (node.data.config.modelId) {
-          get().addLog('api', `API request: [${node.data.config.modelId}] -> ${provider.baseUrl}/chat/completions`, {
+          get().addLog('api', isAdminEdition
+            ? `API request: [${node.data.config.modelId}] -> ${provider.baseUrl}/chat/completions`
+            : `平台线路请求: [${node.data.config.modelId}]`, {
             nodeId: node.id, nodeLabel: node.data.label
           });
         }
@@ -6529,8 +8384,8 @@ export const useStore = create<CanvasState>((set, get) => ({
                 batchTemplate: true,
                 templateOnly: true
               },
-              providerName: provider.name,
-              providerBaseUrl: provider.baseUrl
+              providerName: isAdminEdition ? provider.name : '平台线路',
+              providerBaseUrl: isAdminEdition ? provider.baseUrl : ''
             };
           }
 
@@ -6560,14 +8415,15 @@ export const useStore = create<CanvasState>((set, get) => ({
         const normalizedOutput = (node.type === NodeType.AI_IMAGE || node.type === NodeType.AI_VIDEO)
           ? normalizeGenerationOutput(rawOutput)
           : rawOutput;
+        const responseMeta = mergeAiImageTypographyMeta(node.type as NodeType, node.data.config, output?.meta || null);
 
         return {
           id: node.id,
           output: normalizedOutput,
           inputs: structuredInputs,
-          meta: output?.meta || null,
-          providerName: provider.name,
-          providerBaseUrl: provider.baseUrl
+          meta: responseMeta,
+          providerName: isAdminEdition ? provider.name : '平台线路',
+          providerBaseUrl: isAdminEdition ? provider.baseUrl : ''
         };
       };
 
@@ -6657,7 +8513,7 @@ export const useStore = create<CanvasState>((set, get) => ({
               });
               const canUseOwnPrompt = typeof node.data.config.prompt === 'string' && node.data.config.prompt.trim().length > 0;
               const shouldAutoSkipForNoInput = (
-                (node.type === NodeType.AI_CHAT || node.type === NodeType.AI_AUDIO || node.type === NodeType.OUTPUT)
+                (node.type === NodeType.AI_CHAT || node.type === NodeType.AI_AUDIO || node.type === NodeType.TEXT_RECOGNITION || node.type === NodeType.OUTPUT)
                 && deps.length > 0 && !hasAnyUpstreamData
               ) || (
                   node.type === NodeType.AI_IMAGE && deps.length > 0 && !hasAnyUpstreamData && !canUseOwnPrompt
@@ -6677,7 +8533,7 @@ export const useStore = create<CanvasState>((set, get) => ({
               chainPending.delete(node.id);
               get().updateNodeData(node.id, {
                 status: 'running', error: undefined,
-                progress: (node.type === NodeType.AI_IMAGE || node.type === NodeType.AI_VIDEO) ? 3 : undefined
+                progress: (node.type === NodeType.AI_IMAGE || node.type === NodeType.AI_VIDEO || node.type === NodeType.TEXT_RECOGNITION) ? 3 : undefined
               });
               if (node.type === NodeType.AI_IMAGE || node.type === NodeType.AI_VIDEO) startImageNodeProgress(node.id, get().updateNodeData);
               get().addLog('info', `Processing node: [${node.data.label}]`);
@@ -6731,7 +8587,7 @@ export const useStore = create<CanvasState>((set, get) => ({
             }
             get().updateNodeData(node.id, {
               status: 'success', output, inputs, meta: meta || null,
-              progress: (node.type === NodeType.AI_IMAGE || node.type === NodeType.AI_VIDEO) ? 100 : undefined
+              progress: (node.type === NodeType.AI_IMAGE || node.type === NodeType.AI_VIDEO || node.type === NodeType.TEXT_RECOGNITION) ? 100 : undefined
             });
 
             const batchResults = Array.isArray(meta?.batchResults) ? meta.batchResults as BatchImageResult[] : [];
@@ -6747,14 +8603,15 @@ export const useStore = create<CanvasState>((set, get) => ({
                     id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                     createdAt: Date.now(),
                     nodeId: node.id,
-                    providerName: providerName || 'Unknown provider',
-                    providerBaseUrl: providerBaseUrl || '',
+                    providerName: isAdminEdition ? (providerName || 'Unknown provider') : '平台线路',
+                    providerBaseUrl: isAdminEdition ? (providerBaseUrl || '') : '',
                     modelId: String(meta?.modelId || node.data.config.modelId || 'unknown'),
                     rawPrompt: result.prompt,
                     optimizedPrompt: result.prompt,
                     sourceImageDataUrl: undefined,
                     resultImageUrl: primaryResultUrl,
-                    resultImageDataUrl
+                    resultImageDataUrl,
+                    ...getImageTypographyHistoryFields(meta)
                   });
                 }
                 try {
@@ -6789,14 +8646,15 @@ export const useStore = create<CanvasState>((set, get) => ({
                   id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                   createdAt: Date.now(),
                   nodeId: node.id,
-                  providerName: providerName || 'Unknown provider',
-                  providerBaseUrl: providerBaseUrl || '',
+                  providerName: isAdminEdition ? (providerName || 'Unknown provider') : '平台线路',
+                  providerBaseUrl: isAdminEdition ? (providerBaseUrl || '') : '',
                   modelId,
                   rawPrompt,
                   optimizedPrompt,
                   sourceImageDataUrl,
                   resultImageUrl: primaryResultUrl,
-                  resultImageDataUrl
+                  resultImageDataUrl,
+                  ...getImageTypographyHistoryFields(meta)
                 };
                 try {
                   const persistedItem = await saveImageHistoryItem(item);
@@ -6819,7 +8677,14 @@ export const useStore = create<CanvasState>((set, get) => ({
             failed.set(node.id, errorMsg);
             get().updateNodeData(node.id, { status: 'error', error: errorMsg, progress: undefined });
             get().addLog('error', `Node [${node.data.label}] failed: ${errorMsg}`);
-            get().pushNotice('error', `Node execution failed: ${node.data.label}`);
+            get().pushNotice('error', errorMsg.includes('代币') || errorMsg.includes('额度')
+              ? errorMsg
+              : `Node execution failed: ${node.data.label}`);
+            maybeSuggestBackupRouteAfterFailure(
+              get,
+              node,
+              getActiveProviderForNodeType(apiProviders, activeProviderIds, activeProviderId, node.type),
+            );
           }
 
           if (!stopExecutionRequested) launchReadyInChain();
@@ -6903,7 +8768,7 @@ export const useStore = create<CanvasState>((set, get) => ({
     get().updateNodeData(id, {
       status: 'running',
       error: undefined,
-      progress: node.type === NodeType.AI_IMAGE ? 3 : undefined
+      progress: node.type === NodeType.AI_IMAGE || node.type === NodeType.TEXT_RECOGNITION ? 3 : undefined
     });
     if (node.type === NodeType.AI_IMAGE) {
       startImageNodeProgress(id, get().updateNodeData);
@@ -6984,7 +8849,7 @@ export const useStore = create<CanvasState>((set, get) => ({
         }
       });
 
-      if (missingDeps.length > 0 && node.type !== NodeType.INPUT && node.type !== NodeType.IMAGE_UPLOAD && node.type !== NodeType.MULTI_IMAGE_UPLOAD && node.type !== NodeType.FILE_UPLOAD) {
+      if (missingDeps.length > 0 && node.type !== NodeType.INPUT && node.type !== NodeType.IMAGE_UPLOAD && node.type !== NodeType.MULTI_IMAGE_UPLOAD && node.type !== NodeType.FILE_UPLOAD && node.type !== NodeType.DESIGN_BOARD) {
         throw new Error(`缺少上游数据：请先运行 ${missingDeps.join(', ')}`);
       }
 
@@ -7178,6 +9043,42 @@ export const useStore = create<CanvasState>((set, get) => ({
         return;
       }
 
+      if (node.type === NodeType.DESIGN_BOARD) {
+        const boardConfig = buildDesignBoardConfigForExecution(node.data.config, structuredInputs);
+        let renderedImage: string | undefined;
+        let renderError: string | undefined;
+        try {
+          renderedImage = await renderDesignBoardToDataUrl(boardConfig, structuredInputs);
+        } catch (error: any) {
+          renderError = error?.message || 'Design board render failed';
+          get().addLog('warn', `[${node.data.label}] 设计图导出失败：${renderError}`, {
+            nodeId: id,
+            nodeLabel: node.data.label
+          });
+        }
+        const output = buildDesignBoardOutput(boardConfig, structuredInputs, renderedImage, renderError);
+        stopNodeProgress(id);
+        get().updateNodeData(id, {
+          status: 'success',
+          config: boardConfig,
+          output,
+          inputs: structuredInputs,
+          meta: {
+            layerCount: output.layers.length,
+            boardWidth: output.boardWidth,
+            boardHeight: output.boardHeight,
+            renderedImage: !!renderedImage,
+            renderError
+          },
+          progress: undefined
+        });
+        get().addLog('success', `[${node.data.label}] 已输出 ${output.layers.length} 个可编辑图层${renderedImage ? '和渲染图' : ''}。`, {
+          nodeId: id,
+          nodeLabel: node.data.label
+        });
+        return;
+      }
+
       // 2. Handle simple local nodes (Utility Nodes)
       if (node.type === NodeType.INPUT || node.type === NodeType.IMAGE_UPLOAD || node.type === NodeType.MULTI_IMAGE_UPLOAD || node.type === NodeType.FILE_UPLOAD || node.type === NodeType.OUTPUT || node.type === NodeType.GROUP) {
         let output = node.data.output;
@@ -7199,6 +9100,51 @@ export const useStore = create<CanvasState>((set, get) => ({
           nodeLabel: node.data.label
         });
         return;
+      }
+
+      if (node.type === NodeType.TEXT_RECOGNITION) {
+        const provider = getActiveProviderForModality(apiProviders, activeProviderIds, activeProviderId, 'chat');
+        if (!provider) {
+          throw new Error(isAdminEdition ? 'API provider is not configured' : '当前没有可用的平台视觉线路，请联系管理员配置。');
+        }
+
+        get().addLog('api', isAdminEdition
+          ? `API request: [${node.data.config.modelId || get().globalActiveModels.chat || ''}] -> ${provider.baseUrl}/chat/completions`
+          : `平台线路请求: [${node.data.config.modelId || get().globalActiveModels.chat || ''}]`, {
+          nodeId: id,
+          nodeLabel: node.data.label,
+        });
+
+        const service = new AIService();
+        const nodeAbortController = new AbortController();
+        activeNodeAbortControllers.set(id, nodeAbortController);
+        try {
+          const { output, meta } = await executeTextRecognitionNode({
+            node,
+            inputs: structuredInputs,
+            service,
+            apiSettings: buildApiSettings(provider),
+            fallbackModelId: get().globalActiveModels.chat || get().getModelsForNode(NodeType.TEXT_RECOGNITION)[0] || '',
+            signal: nodeAbortController.signal,
+            onProgress: (progress) => get().updateNodeData(id, { progress }),
+          });
+
+          stopNodeProgress(id);
+          get().updateNodeData(id, {
+            status: 'success',
+            output,
+            inputs: structuredInputs,
+            meta,
+            progress: 100
+          });
+          get().addLog('success', `[${node.data.label}] 已识别 ${output.layers.length} 个文字层。`, {
+            nodeId: id,
+            nodeLabel: node.data.label
+          });
+          return;
+        } finally {
+          activeNodeAbortControllers.delete(id);
+        }
       }
 
       if (node.type === NodeType.PRODUCT_IMAGE_MATCH) {
@@ -7232,7 +9178,7 @@ export const useStore = create<CanvasState>((set, get) => ({
       // 3. Handle AI nodes
       const activeProvider = getActiveProviderForNodeType(apiProviders, activeProviderIds, activeProviderId, node.type);
       if (!activeProvider) {
-        throw new Error('API provider is not configured');
+        throw new Error(isAdminEdition ? 'API provider is not configured' : '当前没有可用的平台线路，请先在模型枢纽选择可用模型。');
       }
 
       const service = new AIService();
@@ -7287,7 +9233,7 @@ export const useStore = create<CanvasState>((set, get) => ({
       const finalOutput = (node.type === NodeType.AI_IMAGE || node.type === NodeType.AI_VIDEO)
         ? normalizeGenerationOutput(rawFinalOutput)
         : rawFinalOutput;
-      const meta = output?.meta || null;
+      const meta = mergeAiImageTypographyMeta(node.type as NodeType, node.data.config, output?.meta || null);
 
       stopNodeProgress(id);
       get().updateNodeData(id, {
@@ -7310,14 +9256,15 @@ export const useStore = create<CanvasState>((set, get) => ({
               id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               createdAt: Date.now(),
               nodeId: node.id,
-              providerName: activeProvider.name || 'Unknown provider',
-              providerBaseUrl: activeProvider.baseUrl || '',
+              providerName: isAdminEdition ? (activeProvider.name || 'Unknown provider') : '平台线路',
+              providerBaseUrl: isAdminEdition ? (activeProvider.baseUrl || '') : '',
               modelId: String(meta?.modelId || node.data.config.modelId || 'unknown'),
               rawPrompt: result.prompt,
               optimizedPrompt: result.prompt,
               sourceImageDataUrl: undefined,
               resultImageUrl: primaryResultUrl,
-              resultImageDataUrl
+              resultImageDataUrl,
+              ...getImageTypographyHistoryFields(meta)
             });
           }
 
@@ -7358,14 +9305,15 @@ export const useStore = create<CanvasState>((set, get) => ({
             id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             createdAt: Date.now(),
             nodeId: node.id,
-            providerName: activeProvider.name || 'Unknown provider',
-            providerBaseUrl: activeProvider.baseUrl || '',
+            providerName: isAdminEdition ? (activeProvider.name || 'Unknown provider') : '平台线路',
+            providerBaseUrl: isAdminEdition ? (activeProvider.baseUrl || '') : '',
             modelId,
             rawPrompt,
             optimizedPrompt,
             sourceImageDataUrl,
             resultImageUrl: primaryResultUrl,
-            resultImageDataUrl
+            resultImageDataUrl,
+            ...getImageTypographyHistoryFields(meta)
           };
 
           try {
@@ -7396,6 +9344,13 @@ export const useStore = create<CanvasState>((set, get) => ({
       stopNodeProgress(id);
       get().updateNodeData(id, { status: 'error', error: errorMsg, progress: undefined });
       get().addLog('error', `Node [${node.data.label}] execution failed: ${errorMsg}`);
+      get().pushNotice('error', errorMsg);
+      const state = get();
+      maybeSuggestBackupRouteAfterFailure(
+        get,
+        node,
+        getActiveProviderForNodeType(state.apiProviders, state.activeProviderIds, state.activeProviderId, node.type),
+      );
     }
   },
 
@@ -7464,6 +9419,7 @@ export const useStore = create<CanvasState>((set, get) => ({
     switch (type) {
       case NodeType.AI_CHAT:
       case NodeType.PRODUCT_IMAGE_MATCH:
+      case NodeType.TEXT_RECOGNITION:
         return Array.from(new Set([...providerChat, ...globalChat]));
       case NodeType.AI_IMAGE:
         return Array.from(new Set([...providerImage, ...globalImage]));

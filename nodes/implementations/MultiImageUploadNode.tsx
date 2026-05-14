@@ -37,7 +37,7 @@ export const MultiImageUploadNode: React.FC<NodeProps<NodeData>> = ({ id, data, 
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
-    const readers = Array.from(files).map((file) => fileToOptimizedImageDataUrl(file));
+    const readers = Array.from(files).map((file: File) => fileToOptimizedImageDataUrl(file));
     void Promise.all(readers).then((results) => {
       const currentImages: string[] = Array.isArray(data.output) ? data.output : [];
       updateNodeData(id, {

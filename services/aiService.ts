@@ -1,5 +1,15 @@
 import type { ChatProtocol, ImageProtocol, ReasoningProtocol } from '../types';
 import type { ImageHistoryItem } from '../types';
+import { isAdminEdition } from '../config/appEdition';
+import {
+    executeClientNode,
+    quoteClientCredits,
+    refundClientCredits,
+    reportClientModelCall,
+    reserveClientCredits,
+    settleClientCredits,
+    type ClientCreditQuoteResponse,
+} from './licenseClientApi';
 
 type ProviderApiSettings = {
     providerName?: string;
@@ -8,6 +18,50 @@ type ProviderApiSettings = {
     chatProtocol?: ChatProtocol;
     reasoningProtocol?: ReasoningProtocol;
     imageProtocol?: ImageProtocol;
+};
+
+const inferModelId = (nodeType: string, config: any): string => {
+    const candidates = [
+        config?.modelId,
+        config?.model,
+        config?.chatModelId,
+        config?.imageModelId,
+        config?.audioModelId,
+        config?.videoModelId,
+    ];
+    const direct = candidates.find((value) => typeof value === 'string' && value.trim());
+    if (direct) return direct.trim();
+    return nodeType ? `${nodeType}-unknown` : 'unknown';
+};
+
+const inferModelGroup = (nodeType: string): string => {
+    const normalized = String(nodeType || '').toLowerCase();
+    if (normalized.includes('image') || normalized.includes('imagen')) return 'image';
+    if (normalized.includes('audio')) return 'audio';
+    if (normalized.includes('video')) return 'video';
+    return 'chat';
+};
+
+const getErrorMessage = (error: unknown): string => {
+    if (error instanceof Error) return error.message;
+    return String(error || 'Unknown error');
+};
+
+const describeCreditRoute = (quote?: ClientCreditQuoteResponse | null) => {
+    const route = quote?.route;
+    const name = route?.display_name || route?.route_name || route?.model_id || '';
+    return name ? `，线路：${name}` : '';
+};
+
+const buildCreditBlockMessage = (quote: ClientCreditQuoteResponse) => {
+    const available = Number(quote.account?.available_balance ?? quote.account?.balance ?? 0);
+    const estimated = Number(quote.estimated_credits || 0);
+    const required = Number(quote.required_credits || estimated || 1);
+    const shortfall = Number(quote.shortfall || Math.max(0, required - available));
+    if (quote.account?.status !== 'enabled') {
+        return '公司额度账户已停用，请联系管理员。';
+    }
+    return `公司代币余额不足：当前可用 ${available}，本次预计消耗 ${estimated}，启动前至少需要 ${required}，还差 ${shortfall}。请联系管理员续费${describeCreditRoute(quote)}。`;
 };
 
 export type AgentBatchItemPayload = {
@@ -78,15 +132,78 @@ export class AIService {
         apiSettings: ProviderApiSettings,
         options?: { signal?: AbortSignal | null }
     ) {
+        const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const modelId = inferModelId(nodeType, config);
+        const modelGroup = inferModelGroup(nodeType);
         const internalController = this.executeTimeoutMs > 0 ? new AbortController() : null;
         const timeoutId = this.executeTimeoutMs > 0
             ? window.setTimeout(() => internalController?.abort(), this.executeTimeoutMs)
             : null;
-
         const mergedSignal = options?.signal || internalController?.signal || undefined;
 
+        if (!isAdminEdition) {
+            try {
+                const data = await executeClientNode({
+                    node_id: nodeId,
+                    node_type: nodeType,
+                    config,
+                    inputs,
+                    model_id: modelId,
+                    model_group: modelGroup,
+                    request_id: nodeId,
+                }, { signal: mergedSignal });
+                return {
+                    output: data?.output,
+                    meta: data?.meta || null,
+                };
+            } catch (error: any) {
+                if (error?.name === 'AbortError') {
+                    throw new Error(`请求被${options?.signal ? '取消' : `超时 (${Math.round(this.executeTimeoutMs / 1000)}s)`}。`);
+                }
+                throw error;
+            } finally {
+                if (timeoutId !== null) {
+                    window.clearTimeout(timeoutId);
+                }
+            }
+        }
+
+        let creditReservation: { transaction_id: number; reserved_credits: number } | null = null;
+        let hasReportedCall = false;
+        const reportCall = (success: boolean, detail?: { errorCode?: string; errorMessage?: string }) => {
+            if (hasReportedCall || !modelId) return;
+            hasReportedCall = true;
+            const endedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            void reportClientModelCall({
+                provider_name: apiSettings.providerName || '',
+                provider_base_url: apiSettings.baseUrl || '',
+                model_id: modelId,
+                model_group: modelGroup,
+                node_type: nodeType,
+                success,
+                latency_ms: endedAt - startedAt,
+                error_code: detail?.errorCode || '',
+                error_message: detail?.errorMessage || '',
+                tokens_charged: creditReservation?.reserved_credits || 0,
+            });
+        };
         let response: Response;
         try {
+            const creditQuote = await quoteClientCredits({
+                model_id: modelId,
+                model_group: modelGroup,
+                node_type: nodeType,
+            });
+            if (creditQuote && !creditQuote.allowed) {
+                throw new Error(buildCreditBlockMessage(creditQuote));
+            }
+            creditReservation = await reserveClientCredits({
+                model_id: modelId,
+                model_group: modelGroup,
+                node_type: nodeType,
+                estimated_credits: creditQuote?.estimated_credits,
+                request_id: nodeId,
+            });
             response = await fetch(`${this.baseUrl}/execute`, {
                 method: 'POST',
                 headers: {
@@ -107,9 +224,15 @@ export class AIService {
                 ...(mergedSignal ? { signal: mergedSignal } : {}),
             });
         } catch (error: any) {
-            if (error?.name === 'AbortError') {
-                throw new Error(`请求被${options?.signal ? '取消' : `超时 (${Math.round(this.executeTimeoutMs / 1000)}s)`}。`);
+            if (creditReservation?.transaction_id) {
+                await refundClientCredits(creditReservation.transaction_id, getErrorMessage(error)).catch(() => null);
             }
+            if (error?.name === 'AbortError') {
+                const message = `请求被${options?.signal ? '取消' : `超时 (${Math.round(this.executeTimeoutMs / 1000)}s)`}。`;
+                reportCall(false, { errorCode: options?.signal ? 'ABORTED' : 'TIMEOUT', errorMessage: message });
+                throw new Error(message);
+            }
+            reportCall(false, { errorCode: 'NETWORK_ERROR', errorMessage: getErrorMessage(error) });
             throw error;
         } finally {
             if (timeoutId !== null) {
@@ -120,10 +243,29 @@ export class AIService {
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             const message = errorData.detail || errorData.message || errorData.error || `HTTP ${response.status}: ${response.statusText}`;
+            if (creditReservation?.transaction_id) {
+                await refundClientCredits(creditReservation.transaction_id, message).catch(() => null);
+            }
+            reportCall(false, { errorCode: `HTTP_${response.status}`, errorMessage: message });
             throw new Error(message);
         }
 
         const data = await response.json();
+        if (creditReservation?.transaction_id) {
+            const settled = await settleClientCredits(
+                creditReservation.transaction_id,
+                creditReservation.reserved_credits,
+                true,
+                'Node execution completed',
+            ).catch(() => null);
+            if (settled?.settled_credits !== undefined) {
+                creditReservation = {
+                    ...creditReservation,
+                    reserved_credits: Number(settled.settled_credits || creditReservation.reserved_credits),
+                };
+            }
+        }
+        reportCall(true);
         return {
             output: data.output,
             meta: data.meta || null,

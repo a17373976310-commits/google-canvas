@@ -48,7 +48,7 @@ export const useCanvasMediaObserver = ({
         observedRef.current.add(el);
       });
 
-      Array.from(observedRef.current).forEach((el) => {
+      Array.from(observedRef.current).forEach((el: Element) => {
         if (root.contains(el)) return;
         observer.unobserve(el);
         observedRef.current.delete(el);

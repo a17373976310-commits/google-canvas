@@ -14,7 +14,6 @@ import ReactFlow, {
 import { useStore } from './store';
 import { Sidebar } from './components/Sidebar';
 import { PropertiesPanel } from './components/PropertiesPanel';
-import { ApiSettingsModal } from './components/ApiSettingsModal';
 import { TerminalOutput } from './components/TerminalOutput';
 import { WorkflowManager } from './components/WorkflowManager';
 import { ImageLightbox } from './components/ImageLightbox';
@@ -25,11 +24,21 @@ import { CanvasAgentPanel } from './components/CanvasAgentPanel';
 import { SoftEdge } from './components/SoftEdge';
 import { ModelHub } from './components/ModelHub';
 import { LicenseGate } from './components/LicenseGate';
-import { InputNode, OutputNode, ChatNode, ImageNode, AudioNode, VideoNode, UploadImageNode, MultiImageUploadNode, GroupNode, FileUploadNode, TableParseNode, TaskSelectNode, BatchExecuteNode, ProductImageMatchNode } from './nodes';
-import { NodeType } from './types';
+import { InputNode, OutputNode, ChatNode, ImageNode, AudioNode, VideoNode, UploadImageNode, MultiImageUploadNode, GroupNode, FileUploadNode, TableParseNode, TaskSelectNode, BatchExecuteNode, ProductImageMatchNode, TextRecognitionNode, DesignBoardNode } from './nodes';
+import { APIProvider, ModelModality, NodeType } from './types';
 import { fileToOptimizedImageDataUrl } from './utils/imageCompression';
 import { useTheme } from './hooks/useTheme';
 import { useCanvasMediaObserver } from './hooks/useCanvasMediaObserver';
+import { checkClientModelHealth } from './services/licenseClientApi';
+import {
+  findBestRouteSuggestion,
+  findLocalProviderForRoute,
+  formatRouteSuccessRate,
+  getRouteDisplayName,
+  MODEL_FIELD_BY_MODALITY,
+  selectActiveProviderForModality,
+  splitProviderModels,
+} from './services/routeRecommendation';
 
 import {
   Maximize2,
@@ -54,10 +63,22 @@ import {
 
 type RightDockTab = 'properties' | 'agent';
 
+const ROUTE_MODALITIES: ModelModality[] = ['chat', 'image', 'audio', 'video'];
+const ROUTE_MODALITY_LABELS: Record<ModelModality, string> = {
+  chat: '对话',
+  image: '图像',
+  audio: '音频',
+  video: '视频',
+};
+
 const requestedAppEdition = (import.meta.env.VITE_APP_EDITION || '').toLowerCase();
 const shouldLoadLicenseAdmin = requestedAppEdition === 'admin' || (!requestedAppEdition && import.meta.env.DEV);
+const canManageApiProviders = shouldLoadLicenseAdmin;
 const LicenseAdminPanel = shouldLoadLicenseAdmin
   ? React.lazy(() => import('@/components/LicenseAdminPanel').then((module) => ({ default: module.LicenseAdminPanel })))
+  : null;
+const ApiSettingsModal = canManageApiProviders
+  ? React.lazy(() => import('@/components/ApiSettingsModal').then((module) => ({ default: module.ApiSettingsModal })))
   : null;
 
 const Flow = () => {
@@ -84,7 +105,10 @@ const Flow = () => {
   const [isConnecting, setIsConnecting] = useState(false);
   const [duplicateCount, setDuplicateCount] = useState('1');
   const interactionTimerRef = useRef<number | null>(null);
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const draftViewportAppliedRef = useRef(false);
   const isInteractingRef = useRef(false);
+  const routeHintShownRef = useRef(false);
   const { resolvedTheme, toggleTheme, reactFlowTheme } = useTheme();
 
   // Expose lightbox globally for node previews
@@ -99,10 +123,12 @@ const Flow = () => {
     [NodeType.TASK_SELECT]: TaskSelectNode,
     [NodeType.BATCH_EXECUTE]: BatchExecuteNode,
     [NodeType.PRODUCT_IMAGE_MATCH]: ProductImageMatchNode,
+    [NodeType.TEXT_RECOGNITION]: TextRecognitionNode,
     [NodeType.AI_CHAT]: ChatNode,
     [NodeType.AI_IMAGE]: ImageNode,
     [NodeType.AI_AUDIO]: AudioNode,
     [NodeType.AI_VIDEO]: VideoNode,
+    [NodeType.DESIGN_BOARD]: DesignBoardNode,
     [NodeType.OUTPUT]: OutputNode,
     [NodeType.GROUP]: GroupNode,
   }), []);
@@ -118,8 +144,6 @@ const Flow = () => {
     style: { strokeWidth: 1.5, stroke: reactFlowTheme.edge }
   }), [reactFlowTheme.edge]);
 
-  // ModelHub still uses this to jump into provider configuration.
-  (window as any).openApiSettings = () => setIsApiSettingsOpen(true);
   const {
     nodes,
     edges,
@@ -142,6 +166,10 @@ const Flow = () => {
     requestStopWorkflow,
     requestStopConcurrent,
     hydrateImageHistory,
+    workspaceDraftHydrated,
+    workspaceDraftViewport,
+    hydrateWorkspaceDraft,
+    persistWorkspaceDraft,
     duplicateSelectionInCanvas,
     toggleSkipForSelection,
     clearAllSkipped
@@ -153,6 +181,107 @@ const Flow = () => {
   const activeRightDockTab: RightDockTab = rightDockTab === 'properties' && !hasSelectedNode && showCanvasAgent
     ? 'agent'
     : rightDockTab;
+
+  const scheduleWorkspaceDraftSave = useCallback(() => {
+    if (!workspaceDraftHydrated) return;
+    if (draftSaveTimerRef.current !== null) {
+      window.clearTimeout(draftSaveTimerRef.current);
+    }
+    draftSaveTimerRef.current = window.setTimeout(() => {
+      draftSaveTimerRef.current = null;
+      void persistWorkspaceDraft({ viewport: reactFlowInstance.getViewport() });
+    }, 1000);
+  }, [persistWorkspaceDraft, reactFlowInstance, workspaceDraftHydrated]);
+
+  useEffect(() => {
+    if (canManageApiProviders) {
+      (window as any).openApiSettings = () => setIsApiSettingsOpen(true);
+    } else {
+      delete (window as any).openApiSettings;
+    }
+    (window as any).openModelHub = () => setShowModelHub(true);
+    return () => {
+      delete (window as any).openApiSettings;
+      delete (window as any).openModelHub;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (routeHintShownRef.current) return;
+    routeHintShownRef.current = true;
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const summary = await checkClientModelHealth();
+          const state = useStore.getState();
+
+          for (const modality of ROUTE_MODALITIES) {
+            const provider = selectActiveProviderForModality(
+              state.apiProviders,
+              state.activeProviderIds,
+              state.activeProviderId,
+              modality,
+            );
+            if (!provider) continue;
+
+            const field = MODEL_FIELD_BY_MODALITY[modality];
+            const modelId = state.globalActiveModels[modality]
+              || splitProviderModels(String(provider[field] || ''))[0]
+              || '';
+            if (!modelId) continue;
+
+            const suggestion = findBestRouteSuggestion({
+              summary,
+              modality,
+              modelId,
+              providerName: provider.name,
+              providerBaseUrl: provider.baseUrl,
+              apiProviders: state.apiProviders,
+              mode: 'startup',
+            });
+            if (!suggestion) continue;
+
+            const canSwitch = canManageApiProviders && Boolean(findLocalProviderForRoute(state.apiProviders, suggestion.route));
+            pushNotice(
+              'info',
+              `发现更稳的${ROUTE_MODALITY_LABELS[modality]}线路：${getRouteDisplayName(suggestion.route)}（${formatRouteSuccessRate(suggestion.route)}）。`,
+              10000,
+              {
+                label: canSwitch ? '切换线路' : '查看线路',
+                onClick: () => {
+                  if (!canManageApiProviders) {
+                    setShowModelHub(true);
+                    return;
+                  }
+                  const latest = useStore.getState();
+                  const localProvider = findLocalProviderForRoute(latest.apiProviders, suggestion.route);
+                  if (!localProvider) {
+                    setShowModelHub(true);
+                    return;
+                  }
+
+                  const routeField = MODEL_FIELD_BY_MODALITY[modality];
+                  const models = splitProviderModels(String(localProvider[routeField] || ''));
+                  if (!models.includes(suggestion.route.model_id)) {
+                    latest.updateProvider(localProvider.id, { [routeField]: [...models, suggestion.route.model_id].join(', ') } as Partial<APIProvider>);
+                  }
+                  latest.setActiveProviderForModality(modality, localProvider.id);
+                  latest.applyModelToNodesByModality(modality, suggestion.route.model_id, 'modality');
+                  latest.pushNotice('success', `已切换到 ${getRouteDisplayName(suggestion.route)} · ${suggestion.route.model_id}`);
+                },
+              },
+            );
+            break;
+          }
+        } catch {
+          // Line health is optional; a missing local license server should not interrupt startup.
+        }
+      })();
+    }, 1400);
+
+    return () => window.clearTimeout(timer);
+  }, [pushNotice]);
 
   const renderedEdges = useMemo(() => {
     return edges.map((edge) => ({
@@ -240,8 +369,32 @@ const Flow = () => {
       if (interactionTimerRef.current !== null) {
         window.clearTimeout(interactionTimerRef.current);
       }
+      if (draftSaveTimerRef.current !== null) {
+        window.clearTimeout(draftSaveTimerRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    void hydrateWorkspaceDraft();
+  }, [hydrateWorkspaceDraft]);
+
+
+  useEffect(() => {
+    if (!workspaceDraftHydrated) return;
+    scheduleWorkspaceDraftSave();
+  }, [edges, nodes, scheduleWorkspaceDraftSave, selectedNodeId, workspaceDraftHydrated]);
+
+  useEffect(() => {
+    if (!workspaceDraftHydrated || draftViewportAppliedRef.current || !workspaceDraftViewport) return;
+    draftViewportAppliedRef.current = true;
+
+    const frame = window.requestAnimationFrame(() => {
+      reactFlowInstance.setViewport(workspaceDraftViewport, { duration: 0 });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [reactFlowInstance, workspaceDraftHydrated, workspaceDraftViewport]);
 
   useEffect(() => {
     void hydrateImageHistory();
@@ -276,7 +429,7 @@ const Flow = () => {
 
       const selectedNode = nodes.find((node) => node.id === selectedNodeId);
       if (!selectedNode || (selectedNode.type !== NodeType.IMAGE_UPLOAD && selectedNode.type !== NodeType.MULTI_IMAGE_UPLOAD)) {
-        pushNotice('warn', '请先选中上传节点（UPLOAD / 多图UPLOAD）再粘贴图片');
+        pushNotice('warn', '鐠囧嘲鍘涢柅澶夎厬娑撳﹣绱堕懞鍌滃仯閿涘湶PLOAD / 婢舵艾娴楿PLOAD閿涘鍟€缁鍒涢崶鍓у');
         return;
       }
 
@@ -309,10 +462,10 @@ const Flow = () => {
             output: [...current, ...images],
             status: 'success'
           });
-          pushNotice('success', `已追加 ${images.length} 张图片到多图节点`);
+          pushNotice('success', `已追加 ${images.length} 张图片到多图上传节点`);
         })
         .catch(() => {
-          pushNotice('error', '读取剪贴板图片失败');
+          pushNotice('error', '处理剪贴板图片失败');
         });
     };
 
@@ -332,7 +485,7 @@ const Flow = () => {
 
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        saveWorkflow(`快速保存 ${new Date().toLocaleString()}`);
+        saveWorkflow(`韫囶偊鈧喍绻氱€?${new Date().toLocaleString()}`);
       }
 
       if (!isTyping && !event.metaKey && !event.ctrlKey && event.key.toLowerCase() === 's') {
@@ -468,18 +621,19 @@ const Flow = () => {
   }, [addNode, nodes, quickNodeMenu.clientX, quickNodeMenu.clientY, reactFlowInstance, selectedNodeId]);
 
   return (
-    <div className={`flex h-full w-full theme-bg-canvas theme-text-primary selection:bg-indigo-500/30 overflow-hidden canvas-app-shell ${isAutoPerformanceMode ? 'perf-mode' : ''} ${isInteracting ? 'interacting' : ''} ${isConnecting ? 'is-connecting' : ''} ${isRightDockOpen ? 'has-right-dock' : ''}`}>
+    <div className={`flex h-full w-full theme-bg-canvas theme-text-primary selection:bg-indigo-500/30 overflow-hidden canvas-app-shell ${shouldLoadLicenseAdmin ? 'edition-admin' : 'edition-client'} ${isAutoPerformanceMode ? 'perf-mode' : ''} ${isInteracting ? 'interacting' : ''} ${isConnecting ? 'is-connecting' : ''} ${isRightDockOpen ? 'has-right-dock' : ''}`}>
       <Sidebar
         isModelHubOpen={showModelHub}
         isLicenseAdminOpen={showLicenseAdmin}
         showLicenseAdmin={shouldLoadLicenseAdmin}
+        showApiSettings={canManageApiProviders}
         onToggleModelHub={() => setShowModelHub((prev) => !prev)}
         onToggleLicenseAdmin={() => setShowLicenseAdmin((prev) => !prev)}
-        onOpenApiSettings={() => setIsApiSettingsOpen(true)}
+        onOpenApiSettings={canManageApiProviders ? () => setIsApiSettingsOpen(true) : undefined}
       />
 
       <div className="flex-1 relative overflow-hidden h-full" ref={reactFlowWrapper} onDoubleClick={onPaneDoubleClick}>
-        <div className="canvas-toolbar absolute top-4 right-4 md:top-8 md:right-8 z-20 flex items-center gap-2 md:gap-3 max-w-[calc(100vw-96px)] flex-wrap justify-end">
+        <div className="canvas-toolbar">
           <input
             type="file"
             ref={fileInputRef}
@@ -492,58 +646,66 @@ const Flow = () => {
             className="hidden"
           >
             <Upload size={16} className="group-hover:-translate-y-0.5 transition-transform" />
-            <span className="hidden sm:inline">导入流程</span>
+            <span className="hidden sm:inline">导入配置</span>
           </button>
           <button
             onClick={handleExport}
             className="hidden"
           >
             <Download size={16} className="group-hover:translate-y-0.5 transition-transform" />
-            <span className="hidden sm:inline">导出流程</span>
+            <span className="hidden sm:inline">导出配置</span>
           </button>
-          <button
-            onClick={() => setShowWorkflowManager(!showWorkflowManager)}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft group ${showWorkflowManager ? 'text-blue-400 border-blue-500/50 bg-blue-500/5' : 'theme-bg-secondary theme-text-secondary theme-border-subtle hover:theme-text-primary hover:theme-border-strong'}`}
-          >
-            <Database size={16} className={showWorkflowManager ? 'animate-pulse' : 'group-hover:scale-110 transition-transform'} />
-            <span className="hidden sm:inline">工作流管理</span>
-          </button>
-          <button
-            onClick={() => setShowHistoryDrawer((prev) => !prev)}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showHistoryDrawer ? 'bg-indigo-500/10 border-indigo-500/40 text-indigo-300' : 'theme-bg-secondary theme-border-subtle theme-text-secondary hover:theme-text-primary hover:theme-border-strong'}`}
-          >
-            <History size={16} />
-            <span className="hidden sm:inline">图像历史</span>
-          </button>
-          <button
-            onClick={toggleAgentDock}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showCanvasAgent && activeRightDockTab === 'agent' ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'theme-bg-secondary theme-border-subtle theme-text-secondary hover:theme-text-primary hover:theme-border-strong'}`}
-          >
-            <Bot size={16} />
-            <span className="hidden sm:inline">画布智能体</span>
-          </button>
-          <button
-            onClick={toggleTheme}
-            className="flex items-center gap-2 theme-bg-secondary border theme-border-subtle theme-text-secondary px-3 md:px-4 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft hover:theme-text-primary hover:theme-border-strong"
-            title={resolvedTheme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
-          >
-            {resolvedTheme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-            <span className="hidden sm:inline">{resolvedTheme === 'dark' ? '亮色' : '暗色'}</span>
-          </button>
-          <button
-            onClick={() => reactFlowInstance.fitView({ duration: 500, padding: 0.2 })}
-            className="flex items-center gap-2 theme-bg-elevated theme-text-primary border theme-border-subtle font-black text-xs px-3 md:px-6 py-2.5 md:py-3 rounded-2xl hover:bg-indigo-500 hover:text-white transition-all theme-shadow-soft group"
-          >
-            <Maximize2 size={16} className="group-hover:rotate-12 transition-transform" />
-            <span className="hidden sm:inline">聚焦全图</span>
-          </button>
-          <button
-            onClick={() => setShowMiniMap((prev) => !prev)}
-            className={`flex items-center gap-2 border px-3 md:px-5 py-2.5 md:py-3 rounded-2xl font-bold text-xs transition-all theme-shadow-soft ${showMiniMap ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'theme-bg-secondary theme-border-subtle theme-text-muted hover:theme-text-secondary hover:theme-border-strong'}`}
-          >
-            <Eye size={16} />
-            <span className="hidden sm:inline">{showMiniMap ? '隐藏地图' : '显示地图'}</span>
-          </button>
+          <div className="canvas-toolbar-group">
+            <button
+              onClick={() => setShowWorkflowManager(!showWorkflowManager)}
+              className={`canvas-toolbar-button ${showWorkflowManager ? 'is-active is-blue' : ''}`}
+            >
+              <Database size={15} className={showWorkflowManager ? 'animate-pulse' : ''} />
+              <span>工作流管理</span>
+            </button>
+            <button
+              onClick={() => setShowHistoryDrawer((prev) => !prev)}
+              className={`canvas-toolbar-button ${showHistoryDrawer ? 'is-active' : ''}`}
+            >
+              <History size={15} />
+              <span>历史记录</span>
+            </button>
+          </div>
+
+          <div className="canvas-toolbar-group is-agent">
+            <button
+              onClick={toggleAgentDock}
+              className={`canvas-toolbar-button ${showCanvasAgent && activeRightDockTab === 'agent' ? 'is-active is-agent' : ''}`}
+            >
+              <Bot size={15} />
+              <span>画布智能体</span>
+            </button>
+          </div>
+
+          <div className="canvas-toolbar-group">
+            <button
+              onClick={toggleTheme}
+              className="canvas-toolbar-button"
+              title={resolvedTheme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+            >
+              {resolvedTheme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+              <span>{resolvedTheme === 'dark' ? '亮色' : '暗色'}</span>
+            </button>
+            <button
+              onClick={() => reactFlowInstance.fitView({ duration: 500, padding: 0.2 })}
+              className="canvas-toolbar-button is-strong"
+            >
+              <Maximize2 size={15} />
+              <span>聚焦全图</span>
+            </button>
+            <button
+              onClick={() => setShowMiniMap((prev) => !prev)}
+              className={`canvas-toolbar-button ${showMiniMap ? 'is-active is-success' : ''}`}
+            >
+              <Eye size={15} />
+              <span>{showMiniMap ? '隐藏地图' : '显示地图'}</span>
+            </button>
+          </div>
         </div>
 
         <ReactFlow
@@ -564,7 +726,10 @@ const Flow = () => {
           }}
           onMoveStart={beginInteraction}
           onMove={handleCanvasMove}
-          onMoveEnd={endInteractionSoon}
+          onMoveEnd={() => {
+            endInteractionSoon();
+            scheduleWorkspaceDraftSave();
+          }}
           onEdgeDoubleClick={(_, edge) => {
             removeEdge(edge.id);
             pushNotice('info', '连线已断开');
@@ -795,7 +960,7 @@ const Flow = () => {
             <div className="canvas-floating-panel-header">
               <div>
                 <h2 className="text-sm font-black theme-text-primary">模型枢纽</h2>
-                <p className="text-[10px] theme-text-muted">拖动模型到节点，或点击批量应用</p>
+                <p className="text-[10px] theme-text-muted">拖动模型到节点，或点击批量应用。</p>
               </div>
               <button
                 type="button"
@@ -829,7 +994,11 @@ const Flow = () => {
         )}
       </div>
 
-      <ApiSettingsModal isOpen={isApiSettingsOpen} onClose={() => setIsApiSettingsOpen(false)} />
+      {canManageApiProviders && ApiSettingsModal && (
+        <React.Suspense fallback={null}>
+          <ApiSettingsModal isOpen={isApiSettingsOpen} onClose={() => setIsApiSettingsOpen(false)} />
+        </React.Suspense>
+      )}
     </div>
   );
 };

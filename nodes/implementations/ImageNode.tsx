@@ -1,23 +1,34 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { NodeProps } from 'reactflow';
-import { Image as ImageIcon, Layers, Sparkles, ZoomIn } from 'lucide-react';
+import { Image as ImageIcon, Layers, Sparkles, Type, ZoomIn } from 'lucide-react';
 import { NodeData } from '../../types';
 import { BaseNode } from '../BaseNode';
 import { ImageLightbox } from '../../components/ImageLightbox';
 import { normalizeImageSrc } from '../../utils/normalizeImageSrc';
 import { useStore } from '../../store';
 import { useShallow } from 'zustand/react/shallow';
+import { getCanvasFontById } from '../../services/fontRegistry';
 
 export const ImageNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected }) => {
-  const edgeState = useStore(useShallow((state) => ({
-    prompt: state.edges.some((edge) => edge.target === id && edge.targetHandle === 'prompt'),
-    image: state.edges.some((edge) => edge.target === id && edge.targetHandle === 'image'),
-    batch: state.edges.some((edge) => edge.target === id && edge.targetHandle === 'batch'),
+  const { hasPromptEdge, hasImageEdge, hasBatchEdge, reconstructImageTextToDesignBoard } = useStore(useShallow((state) => ({
+    hasPromptEdge: state.edges.some((edge) => edge.target === id && edge.targetHandle === 'prompt'),
+    hasImageEdge: state.edges.some((edge) => edge.target === id && edge.targetHandle === 'image'),
+    hasBatchEdge: state.edges.some((edge) => edge.target === id && edge.targetHandle === 'batch'),
+    reconstructImageTextToDesignBoard: state.reconstructImageTextToDesignBoard,
   })));
+  const edgeState = {
+    prompt: hasPromptEdge,
+    image: hasImageEdge,
+    batch: hasBatchEdge,
+  };
   const isBatchTemplate = !!(edgeState.batch || data.meta?.batchTemplate || data.meta?.templateOnly);
   const isExpandedTaskNode = !!data.meta?.batchExpansion;
   const taskIndex = data.meta?.batchExpansion?.selectedIndex ?? data.meta?.selectedIndex;
+  const typefacePromptActive = data.config?.enableTypefacePrompt === true && !!data.config?.typographyFontId;
+  const typographyFont = typefacePromptActive ? getCanvasFontById(data.config?.typographyFontId) : null;
+  const typographyText = typefacePromptActive ? String(data.config?.typographyText || '').trim() : '';
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [isReconstructingText, setIsReconstructingText] = useState(false);
 
   const generatedImages = useMemo(() => {
     if (Array.isArray(data.output)) {
@@ -36,6 +47,23 @@ export const ImageNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected })
     event.stopPropagation();
     setLightboxOpen(true);
   }, []);
+  const handleReconstructText = useCallback(async (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!previewImage || isReconstructingText) return;
+    setIsReconstructingText(true);
+    try {
+      await reconstructImageTextToDesignBoard({
+        imageSrc: previewImage,
+        sourceNodeId: id,
+        sourceLabel: data.label,
+        typographyFontId: data.meta?.typographyFontId || data.config?.typographyFontId,
+        typographyText: data.meta?.typographyText || data.config?.typographyText,
+      });
+    } finally {
+      setIsReconstructingText(false);
+    }
+  }, [data.config?.typographyFontId, data.config?.typographyText, data.label, data.meta?.typographyFontId, data.meta?.typographyText, id, isReconstructingText, previewImage, reconstructImageTextToDesignBoard]);
 
   return (
     <BaseNode id={id} data={data} icon={ImageIcon} color="bg-purple-500" selected={selected}>
@@ -53,6 +81,17 @@ export const ImageNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected })
             <Layers size={10} />
             {isExpandedTaskNode ? `任务 #${taskIndex || '-'}` : '批量'}
           </span>
+          {typographyFont && (
+            <span className="inline-flex max-w-[145px] items-center gap-1 rounded-md border border-fuchsia-500/25 bg-fuchsia-500/10 px-2 py-1 text-[9px] font-semibold text-fuchsia-300">
+              <Type size={10} />
+              <span className="truncate">字体：{typographyFont.label}</span>
+            </span>
+          )}
+          {typographyText && (
+            <span className="inline-flex max-w-[150px] items-center gap-1 rounded-md border border-violet-500/25 bg-violet-500/10 px-2 py-1 text-[9px] font-semibold text-violet-300">
+              <span className="truncate">文字：{typographyText}</span>
+            </span>
+          )}
         </div>
 
         {isExpandedTaskNode && (
@@ -80,6 +119,17 @@ export const ImageNode: React.FC<NodeProps<NodeData>> = ({ id, data, selected })
                 共 {generatedImages.length} 张
               </div>
             )}
+            <button
+              type="button"
+              className="absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-lg border border-fuchsia-400/25 bg-black/45 px-2.5 py-1.5 text-[9px] font-bold text-fuchsia-100 opacity-0 shadow-lg shadow-black/20 backdrop-blur transition-all hover:border-fuchsia-300/50 hover:bg-fuchsia-500/25 group-hover:opacity-100"
+              data-node-interactive="true"
+              onClick={handleReconstructText}
+              disabled={isReconstructingText}
+              title="先去除原图文案，再生成可编辑文字画板"
+            >
+              <Type size={11} />
+              {isReconstructingText ? '转换中' : '转可编辑文字'}
+            </button>
             <div className="canvas-image-preview-hover" aria-hidden="true">
               <span className="canvas-image-preview-corner is-top-left" />
               <span className="canvas-image-preview-corner is-top-right" />

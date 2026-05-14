@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   AlertCircle,
-  Bell,
   CheckCircle2,
   Clock3,
   Copy,
@@ -19,9 +18,9 @@ import {
   activateClientLicense,
   APP_VERSION,
   checkClientAnnouncements,
+  checkClientCredits,
   checkClientUpdate,
   clearStoredLicenseState,
-  ClientAnnouncement,
   getLicenseServerUrl,
   getOrCreateDeviceId,
   hasValidLease,
@@ -44,13 +43,6 @@ const normalizeCode = (value: string) => value.trim();
 const normalizeNickname = (value: string) => Array.from(value.trim()).slice(0, 4).join('');
 const UPDATE_DISMISS_KEY = 'awei_client_update_dismissed_version';
 
-const announcementKindLabel = (kind?: string) => {
-  if (kind === 'important') return '重要';
-  if (kind === 'maintenance') return '维护';
-  if (kind === 'warning') return '提醒';
-  return '公告';
-};
-
 const getStatusTone = (status?: StoredLicenseState['status']) => {
   if (status === 'enabled') return 'ok';
   if (status === 'disabled' || status === 'error') return 'error';
@@ -64,7 +56,6 @@ export const LicenseGate: React.FC<LicenseGateProps> = ({ children }) => {
   const [nickname, setNickname] = React.useState(() => readStoredLicenseState()?.nickname || '');
   const [loading, setLoading] = React.useState(!isAdminEdition);
   const [message, setMessage] = React.useState<{ type: 'ok' | 'warn' | 'error'; text: string } | null>(null);
-  const [isAnnouncementOpen, setIsAnnouncementOpen] = React.useState(false);
   const [isComposingNickname, setIsComposingNickname] = React.useState(false);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = React.useState(() => {
     try {
@@ -134,19 +125,21 @@ export const LicenseGate: React.FC<LicenseGateProps> = ({ children }) => {
     if (!saved?.licenseKey || saved.status !== 'enabled') return;
 
     try {
-      const [version, announcements] = await Promise.all([
+      const [version, announcements, credits] = await Promise.all([
         checkClientUpdate(),
         checkClientAnnouncements(saved.licenseKey),
+        checkClientCredits().catch(() => saved.credits),
       ]);
       const next: StoredLicenseState = {
         ...saved,
         version,
         announcements,
+        credits,
       };
       saveStoredLicenseState(next);
       setState((current) => {
         if (!current || current.deviceId !== saved.deviceId) return current;
-        return { ...current, version, announcements };
+        return { ...current, version, announcements, credits };
       });
     } catch {
       // Version checks are best-effort; authorization checks still handle hard failures.
@@ -206,6 +199,16 @@ export const LicenseGate: React.FC<LicenseGateProps> = ({ children }) => {
     };
   }, [refreshVersionOnly]);
 
+  React.useEffect(() => {
+    if (isAdminEdition) return undefined;
+    const onLicenseStateChange = (event: Event) => {
+      const detail = (event as CustomEvent<StoredLicenseState>).detail;
+      if (detail?.deviceId) setState(detail);
+    };
+    window.addEventListener('awei-license-state-change', onLicenseStateChange);
+    return () => window.removeEventListener('awei-license-state-change', onLicenseStateChange);
+  }, []);
+
   const submitActivation = async (event: React.FormEvent) => {
     event.preventDefault();
     const code = normalizeCode(licenseKey);
@@ -258,17 +261,7 @@ export const LicenseGate: React.FC<LicenseGateProps> = ({ children }) => {
   const showUpdateNotice = state?.status === 'enabled'
     && hasUpdate
     && (requiresUpdate || dismissedUpdateVersion !== latestVersion);
-  const activeAnnouncements = state?.announcements || [];
-  const announcementCount = activeAnnouncements.length + (hasUpdate ? 1 : 0);
   const nicknameCount = Array.from(nickname.trim()).length;
-
-  const updateAnnouncement = hasUpdate ? {
-    id: 'update',
-    kind: requiresUpdate ? 'warning' : 'important',
-    title: `AWEI Canvas ${latestVersion}`,
-    body: versionInfo?.release_notes || '发现可用的新版本。',
-    meta: `当前版本 ${versionInfo?.current_version || APP_VERSION}${versionInfo?.min_version ? ` · 最低可用 ${versionInfo.min_version}` : ''}`,
-  } : null;
 
   const dismissUpdate = () => {
     if (!latestVersion) return;
@@ -299,64 +292,6 @@ export const LicenseGate: React.FC<LicenseGateProps> = ({ children }) => {
     return (
       <>
         {children}
-        {announcementCount > 0 && (
-          <div className="license-announcement-hub">
-            <button
-              type="button"
-              className="license-announcement-trigger"
-              onClick={() => setIsAnnouncementOpen((current) => !current)}
-              aria-expanded={isAnnouncementOpen}
-              aria-label="公告栏"
-            >
-              <Bell size={16} />
-              <span>公告</span>
-              <strong>{announcementCount}</strong>
-            </button>
-
-            {isAnnouncementOpen && (
-              <div className="license-announcement-panel" role="dialog" aria-label="公告栏">
-                <div className="license-announcement-head">
-                  <div>
-                    <h2>公告栏</h2>
-                    <p>公告和版本更新都会保留在这里</p>
-                  </div>
-                  <button type="button" onClick={() => setIsAnnouncementOpen(false)} aria-label="关闭公告栏">
-                    <X size={15} />
-                  </button>
-                </div>
-                <div className="license-announcement-list custom-scrollbar">
-                  {updateAnnouncement && (
-                    <article className={`license-announcement-item is-${updateAnnouncement.kind}`}>
-                      <div className="license-announcement-item-top">
-                        <span>{requiresUpdate ? '强制更新' : '版本更新'}</span>
-                        <time>{latestVersion}</time>
-                      </div>
-                      <h3>{updateAnnouncement.title}</h3>
-                      <p className="license-announcement-meta">{updateAnnouncement.meta}</p>
-                      <div className="license-announcement-body">{updateAnnouncement.body}</div>
-                      <div className="license-announcement-actions">
-                        <button type="button" disabled={!downloadUrl} onClick={() => void openDownloadTarget()}>
-                          {downloadUrl && /^(https?:\/\/|file:\/\/)/i.test(downloadUrl) ? <Download size={14} /> : <Copy size={14} />}
-                          {downloadUrl && /^(https?:\/\/|file:\/\/)/i.test(downloadUrl) ? '下载新版' : '复制下载地址'}
-                        </button>
-                      </div>
-                    </article>
-                  )}
-                  {activeAnnouncements.map((announcement: ClientAnnouncement) => (
-                    <article key={announcement.id} className={`license-announcement-item is-${announcement.kind}`}>
-                      <div className="license-announcement-item-top">
-                        <span>{announcementKindLabel(announcement.kind)}</span>
-                        <time>{new Date(announcement.updated_at).toLocaleDateString('zh-CN')}</time>
-                      </div>
-                      <h3>{announcement.title}</h3>
-                      <div className="license-announcement-body">{announcement.body}</div>
-                    </article>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
         {showUpdateNotice && (
           <div className={`license-update-notice ${requiresUpdate ? 'is-required' : 'is-optional'}`} role="dialog" aria-live="polite" aria-label="版本更新提示">
             <div className="license-update-card">

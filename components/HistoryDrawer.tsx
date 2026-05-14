@@ -1,8 +1,9 @@
 import React from 'react';
 import { useStore } from '../store';
 import { ImageHistoryItem, NodeType } from '../types';
-import { History, X, Copy, Trash2, RotateCcw, Download, Search, Maximize2 } from 'lucide-react';
+import { History, X, Copy, Trash2, RotateCcw, Download, Search, Maximize2, Type } from 'lucide-react';
 import { normalizeImageSrc } from '../utils/normalizeImageSrc';
+import { isAdminEdition } from '../config/appEdition';
 
 interface HistoryDrawerProps {
   isOpen: boolean;
@@ -15,6 +16,10 @@ const getPreviewSrc = (item: ImageHistoryItem) =>
 const getSourceSrc = (item: ImageHistoryItem) =>
   normalizeImageSrc(item.sourceImageDataUrl) || '';
 
+const getProviderLabel = (item: ImageHistoryItem) => (
+  isAdminEdition ? (item.providerName || '未知提供商') : '平台线路'
+);
+
 export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose }) => {
   const {
     imageHistory,
@@ -24,10 +29,12 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose })
     nodes,
     updateNodeData,
     pushNotice,
+    reconstructImageTextToDesignBoard,
   } = useStore();
 
   const [search, setSearch] = React.useState('');
   const [activeId, setActiveId] = React.useState<string | null>(null);
+  const [isReconstructing, setIsReconstructing] = React.useState(false);
 
   const openPreview = React.useCallback((src: string) => {
     if (!src) return;
@@ -42,7 +49,9 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose })
         item.modelId.toLowerCase().includes(q)
         || item.rawPrompt.toLowerCase().includes(q)
         || item.optimizedPrompt.toLowerCase().includes(q)
-        || item.providerName.toLowerCase().includes(q)
+        || (item.typographyFontLabel || '').toLowerCase().includes(q)
+        || (item.typographyText || '').toLowerCase().includes(q)
+        || (isAdminEdition && item.providerName.toLowerCase().includes(q))
       );
     });
   }, [imageHistory, search]);
@@ -86,9 +95,34 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose })
         prompt: promptToApply,
         promptTemplate: 'free_mode',
         enablePromptTemplate: false,
+        typographyFontId: activeItem.typographyFontId || selectedNode.data.config.typographyFontId || '',
+        typographyText: activeItem.typographyText || selectedNode.data.config.typographyText || '',
+        enableTypefacePrompt: activeItem.typographyFontId
+          ? true
+          : !!selectedNode.data.config.enableTypefacePrompt,
       },
     });
     pushNotice('success', '已回填到当前图像节点');
+  };
+
+  const handleReconstructTextLayer = async () => {
+    if (!activeItem || isReconstructing) return;
+    const src = getPreviewSrc(activeItem);
+    if (!src) {
+      pushNotice('warn', '当前历史记录没有可识别图片');
+      return;
+    }
+    setIsReconstructing(true);
+    try {
+      await reconstructImageTextToDesignBoard({
+        imageSrc: src,
+        sourceLabel: `历史图像 · ${activeItem.modelId}`,
+        typographyFontId: activeItem.typographyFontId,
+        typographyText: activeItem.typographyText,
+      });
+    } finally {
+      setIsReconstructing(false);
+    }
   };
 
   const handleDownload = async () => {
@@ -198,6 +232,14 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose })
                 </div>
                 <p className="mt-2 text-[10px] font-black theme-text-primary truncate">{item.modelId}</p>
                 <p className="text-[10px] theme-text-muted truncate mt-0.5">{item.optimizedPrompt || item.rawPrompt}</p>
+                {(item.typographyFontLabel || item.typographyText) && (
+                  <div className="mt-2 flex min-w-0 items-center gap-1 rounded-lg border border-fuchsia-500/20 bg-fuchsia-500/10 px-2 py-1 text-[9px] font-semibold text-fuchsia-300">
+                    <Type size={10} className="shrink-0" />
+                    <span className="truncate">
+                      {item.typographyFontLabel || '字体库'}{item.typographyText ? ` · ${item.typographyText}` : ''}
+                    </span>
+                  </div>
+                )}
                 <p className="text-[9px] theme-text-disabled mt-1">{new Date(item.createdAt).toLocaleString()}</p>
               </button>
             );
@@ -265,8 +307,24 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose })
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-[10px]">
                   <div className="bg-black/30 border theme-border-subtle rounded-xl p-2 theme-text-secondary">模型: <span className="theme-text-primary">{activeItem.modelId}</span></div>
-                  <div className="bg-black/30 border theme-border-subtle rounded-xl p-2 theme-text-secondary">提供商: <span className="theme-text-primary">{activeItem.providerName}</span></div>
+                  <div className="bg-black/30 border theme-border-subtle rounded-xl p-2 theme-text-secondary">提供商: <span className="theme-text-primary">{getProviderLabel(activeItem)}</span></div>
                 </div>
+                {(activeItem.typographyFontLabel || activeItem.typographyText) && (
+                  <div className="rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/[0.08] p-3">
+                    <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-fuchsia-300">
+                      <Type size={12} />
+                      文字风格
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 text-[10px] md:grid-cols-2">
+                      <div className="rounded-lg border border-fuchsia-500/15 bg-black/20 p-2 theme-text-secondary">
+                        字体: <span className="theme-text-primary">{activeItem.typographyFontLabel || activeItem.typographyFontId || '-'}</span>
+                      </div>
+                      <div className="rounded-lg border border-fuchsia-500/15 bg-black/20 p-2 theme-text-secondary">
+                        主要文字: <span className="theme-text-primary">{activeItem.typographyText || '-'}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap gap-2">
@@ -278,6 +336,13 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({ isOpen, onClose })
                 </button>
                 <button onClick={handleApplyToSelectedNode} className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider bg-emerald-500/15 border border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/25">
                   <RotateCcw size={12} className="inline mr-1" /> 回填到当前图像节点
+                </button>
+                <button
+                  onClick={() => void handleReconstructTextLayer()}
+                  disabled={isReconstructing}
+                  className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider bg-fuchsia-500/15 border border-fuchsia-500/25 text-fuchsia-300 hover:bg-fuchsia-500/25 disabled:opacity-50"
+                >
+                  <Type size={12} className="inline mr-1" /> {isReconstructing ? '转换中' : '转可编辑文字'}
                 </button>
                 <button onClick={handleDownload} className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider theme-bg-secondary border theme-border-medium theme-text-primary hover:theme-text-primary">
                   <Download size={12} className="inline mr-1" /> 下载最终图片

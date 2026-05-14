@@ -11,10 +11,12 @@ export enum NodeType {
   BATCH_EXECUTE = 'BATCH_EXECUTE',
   STYLE_GUIDE = 'STYLE_GUIDE',
   PRODUCT_IMAGE_MATCH = 'PRODUCT_IMAGE_MATCH',
+  TEXT_RECOGNITION = 'TEXT_RECOGNITION',
   AI_CHAT = 'AI_CHAT',
   AI_IMAGE = 'AI_IMAGE',
   AI_AUDIO = 'AI_AUDIO',
   AI_VIDEO = 'AI_VIDEO',
+  DESIGN_BOARD = 'DESIGN_BOARD',
   OUTPUT = 'OUTPUT',
   GROUP = 'GROUP'
 }
@@ -41,6 +43,8 @@ export interface Notice {
   id: string;
   level: NoticeLevel;
   message: string;
+  actionLabel?: string;
+  action?: () => void;
 }
 
 export interface StandardFilePayload {
@@ -229,6 +233,79 @@ export interface CanonicalImageResult {
   localCacheUrl?: string | null;
 }
 
+export interface DesignBoardTextLayer {
+  id: string;
+  type: 'text';
+  name: string;
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  rotation: number;
+  fontId: string;
+  fontSize: number;
+  color: string;
+  opacity: number;
+  align: 'left' | 'center' | 'right';
+  letterSpacing: number;
+  lineHeight: number;
+  role?: 'headline' | 'subtitle' | 'selling-point' | 'price' | 'badge' | 'footer' | 'icon-label' | 'other';
+  readingOrder?: number;
+  zIndex?: number;
+  stroke?: {
+    enabled: boolean;
+    color: string;
+    width: number;
+  };
+  shadow?: {
+    enabled: boolean;
+    color: string;
+    x: number;
+    y: number;
+    blur: number;
+  };
+}
+
+export interface DesignBoardConfig {
+  boardWidth: number;
+  boardHeight: number;
+  backgroundColor: string;
+  backgroundImage?: string;
+  selectedLayerId?: string;
+  layers: DesignBoardTextLayer[];
+}
+
+export interface DesignBoardOutput {
+  kind: 'design-board';
+  version: 1;
+  boardWidth: number;
+  boardHeight: number;
+  backgroundColor: string;
+  backgroundImage?: string;
+  image?: string;
+  primaryUrl?: string;
+  url?: string;
+  urls?: string[];
+  previewDataUrl?: string;
+  renderError?: string;
+  layers: DesignBoardTextLayer[];
+  updatedAt: number;
+}
+
+export interface TextRecognitionOutput {
+  kind: 'text-recognition';
+  version: 1;
+  boardWidth: number;
+  boardHeight: number;
+  image?: string;
+  text: string;
+  layers: DesignBoardTextLayer[];
+  rawRecognition?: string;
+  structuredRecognition?: any;
+  promptReference?: string;
+  updatedAt: number;
+}
+
 export interface ModelCapabilities {
   allowedAspectRatios?: string[];
   allowedImageSizes?: string[];
@@ -250,6 +327,9 @@ export interface ImageHistoryItem {
   sourceImageDataUrl?: string;
   resultImageUrl: string;
   resultImageDataUrl?: string;
+  typographyFontId?: string;
+  typographyFontLabel?: string;
+  typographyText?: string;
 }
 
 export interface LogEntry {
@@ -266,6 +346,7 @@ export const NODE_CAPABILITIES: Record<NodeType, NodeCapability> = {
   [NodeType.AI_IMAGE]: NodeCapability.IMAGE_GENERATION,
   [NodeType.AI_AUDIO]: NodeCapability.AUDIO_SYNTHESIS,
   [NodeType.AI_VIDEO]: NodeCapability.VIDEO_MOTION,
+  [NodeType.DESIGN_BOARD]: NodeCapability.UTILITY,
   [NodeType.INPUT]: NodeCapability.UTILITY,
   [NodeType.IMAGE_UPLOAD]: NodeCapability.UTILITY,
   [NodeType.MULTI_IMAGE_UPLOAD]: NodeCapability.UTILITY,
@@ -275,6 +356,7 @@ export const NODE_CAPABILITIES: Record<NodeType, NodeCapability> = {
   [NodeType.BATCH_EXECUTE]: NodeCapability.UTILITY,
   [NodeType.STYLE_GUIDE]: NodeCapability.UTILITY,
   [NodeType.PRODUCT_IMAGE_MATCH]: NodeCapability.TEXT_REASONING,
+  [NodeType.TEXT_RECOGNITION]: NodeCapability.TEXT_REASONING,
   [NodeType.OUTPUT]: NodeCapability.UTILITY,
   [NodeType.GROUP]: NodeCapability.GROUPING
 };
@@ -284,6 +366,7 @@ export const NODE_MODALITIES: Record<NodeType, NodeModality> = {
   [NodeType.AI_IMAGE]: 'ai',
   [NodeType.AI_AUDIO]: 'ai',
   [NodeType.AI_VIDEO]: 'ai',
+  [NodeType.DESIGN_BOARD]: 'utility',
   [NodeType.INPUT]: 'utility',
   [NodeType.IMAGE_UPLOAD]: 'utility',
   [NodeType.MULTI_IMAGE_UPLOAD]: 'utility',
@@ -293,6 +376,7 @@ export const NODE_MODALITIES: Record<NodeType, NodeModality> = {
   [NodeType.BATCH_EXECUTE]: 'utility',
   [NodeType.STYLE_GUIDE]: 'utility',
   [NodeType.PRODUCT_IMAGE_MATCH]: 'ai',
+  [NodeType.TEXT_RECOGNITION]: 'ai',
   [NodeType.OUTPUT]: 'utility',
   [NodeType.GROUP]: 'utility'
 };
@@ -358,10 +442,20 @@ export interface SavedWorkflow {
   edges?: Edge[];
 }
 
+export interface CanvasViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
 export interface CanvasState {
   nodes: Node<NodeData>[];
   edges: Edge[];
   selectedNodeId: string | null;
+  workspaceDraftHydrated: boolean;
+  workspaceDraftSaving: boolean;
+  workspaceDraftUpdatedAt: number | null;
+  workspaceDraftViewport?: CanvasViewport | null;
   apiProviders: APIProvider[];
   activeProviderId: string | null;
   activeProviderIds: Partial<Record<ModelModality, string>>;
@@ -389,6 +483,9 @@ export interface CanvasState {
   loadWorkflow: (id: string) => void;
   deleteWorkflow: (id: string) => void;
   clearCanvas: () => void;
+  hydrateWorkspaceDraft: () => Promise<void>;
+  persistWorkspaceDraft: (options?: { viewport?: CanvasViewport | null }) => Promise<void>;
+  clearWorkspaceDraft: () => Promise<void>;
 
   // Security & Dev Actions
   isDevMode: boolean;
@@ -403,6 +500,13 @@ export interface CanvasState {
 
   executeWorkflow: () => Promise<void>;
   executeSingleNode: (id: string) => Promise<void>;
+  reconstructImageTextToDesignBoard: (params: {
+    imageSrc: string;
+    sourceNodeId?: string;
+    sourceLabel?: string;
+    typographyFontId?: string;
+    typographyText?: string;
+  }) => Promise<string | null>;
   isWorkflowRunning: boolean;
   maxWorkflowConcurrency: number;
   requestStopWorkflow: () => void;
@@ -424,7 +528,7 @@ export interface CanvasState {
   addLog: (level: LogLevel, message: string, meta?: { nodeId?: string, nodeLabel?: string }) => void;
   clearLogs: () => void;
   notices: Notice[];
-  pushNotice: (level: NoticeLevel, message: string, durationMs?: number) => void;
+  pushNotice: (level: NoticeLevel, message: string, durationMs?: number, action?: { label: string; onClick: () => void }) => void;
   removeNotice: (id: string) => void;
 
   imageHistory: ImageHistoryItem[];

@@ -9,6 +9,9 @@ export default defineConfig(({ mode }) => {
     const licenseAdminPanelPath = appEdition === 'admin'
       ? path.resolve(__dirname, 'components/LicenseAdminPanel.tsx')
       : path.resolve(__dirname, 'components/LicenseAdminPanel.stub.tsx');
+    const apiSettingsModalPath = appEdition === 'admin'
+      ? path.resolve(__dirname, 'components/ApiSettingsModal.tsx')
+      : path.resolve(__dirname, 'components/ApiSettingsModal.stub.tsx');
 
     return {
       server: {
@@ -50,6 +53,7 @@ export default defineConfig(({ mode }) => {
       resolve: {
         alias: {
           '@/components/LicenseAdminPanel': licenseAdminPanelPath,
+          '@/components/ApiSettingsModal': apiSettingsModalPath,
           '@': path.resolve(__dirname, '.'),
         }
       }

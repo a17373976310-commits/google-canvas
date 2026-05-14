@@ -104,6 +104,15 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
       source('report', '匹配报告', 'sky'),
     ],
   },
+  [NodeType.TEXT_RECOGNITION]: {
+    type: NodeType.TEXT_RECOGNITION,
+    handles: [
+      target('image', '原图', 'orange'),
+      target('prompt', '识别要求', 'blue'),
+      source('layers', '文字图层', 'fuchsia'),
+      source('text', '识别文案', 'violet'),
+    ],
+  },
   [NodeType.AI_CHAT]: {
     type: NodeType.AI_CHAT,
     handles: [
@@ -136,6 +145,17 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
       target('prompt', '视频提示词', 'blue'),
       target('image', '首尾帧/参考图', 'orange'),
       source(undefined, '视频输出', 'rose'),
+    ],
+  },
+  [NodeType.DESIGN_BOARD]: {
+    type: NodeType.DESIGN_BOARD,
+    handles: [
+      target('sourceImage', '原文图', 'orange'),
+      target('cleanImage', '无字背景', 'purple'),
+      target('image', '背景图', 'orange'),
+      target('textReference', '文案参考', 'blue'),
+      source('image', '渲染图', 'violet'),
+      source('output', '图层数据', 'fuchsia'),
     ],
   },
   [NodeType.OUTPUT]: {
@@ -175,6 +195,9 @@ export const inferConnectionHandles = (
     if (isUploadNodeType(sourceType) || sourceType === NodeType.PRODUCT_IMAGE_MATCH || sourceType === NodeType.AI_IMAGE) targetHandle = 'image';
     else if (sourceType === NodeType.BATCH_EXECUTE) targetHandle = 'batch';
     else targetHandle = 'prompt';
+  } else if (targetType === NodeType.TEXT_RECOGNITION) {
+    if (isUploadNodeType(sourceType) || sourceType === NodeType.AI_IMAGE || sourceType === NodeType.PRODUCT_IMAGE_MATCH) targetHandle = 'image';
+    else targetHandle = 'prompt';
   } else if (targetType === NodeType.AI_CHAT) {
     if (isUploadNodeType(sourceType) || sourceType === NodeType.AI_IMAGE || sourceType === NodeType.PRODUCT_IMAGE_MATCH) targetHandle = 'image';
     else if (sourceType === NodeType.STYLE_GUIDE) targetHandle = 'style';
@@ -182,6 +205,10 @@ export const inferConnectionHandles = (
   } else if (targetType === NodeType.AI_VIDEO) {
     if (isUploadNodeType(sourceType) || sourceType === NodeType.AI_IMAGE) targetHandle = 'image';
     else targetHandle = 'prompt';
+  } else if (targetType === NodeType.DESIGN_BOARD) {
+    if (sourceType === NodeType.INPUT || sourceType === NodeType.AI_CHAT || sourceType === NodeType.TEXT_RECOGNITION) targetHandle = 'textReference';
+    else if (sourceType === NodeType.AI_IMAGE) targetHandle = 'cleanImage';
+    else targetHandle = 'sourceImage';
   } else if (targetType === NodeType.AI_AUDIO) {
     targetHandle = 'prompt';
   }
@@ -195,6 +222,10 @@ export const inferConnectionHandles = (
     sourceHandle = targetHandle === 'prompt' ? 'report' : 'image';
   } else if (sourceType === NodeType.BATCH_EXECUTE) {
     sourceHandle = 'batch';
+  } else if (sourceType === NodeType.TEXT_RECOGNITION) {
+    sourceHandle = targetHandle === 'textReference' ? 'layers' : 'text';
+  } else if (sourceType === NodeType.DESIGN_BOARD) {
+    sourceHandle = targetHandle === 'image' ? 'image' : 'output';
   } else if (sourceType === NodeType.TABLE_PARSE || sourceType === NodeType.INPUT || isUploadNodeType(sourceType)) {
     sourceHandle = 'output';
   }
